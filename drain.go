@@ -13,7 +13,9 @@ const DefaultDrainPoll = 500 * time.Millisecond
 // WaitForDrain blocks until no run holds the lock at path (the in-flight run
 // finished, or its process died — flock releases on exit), or until maxWait
 // elapses or ctx is cancelled. It returns true if the run drained and false
-// otherwise. It is the external-mode shutdown drain: when runs are triggered
+// otherwise. A failure probing the lock (an I/O error on the lock path) is
+// treated conservatively as "not drained" and also returns false. It is the
+// external-mode shutdown drain: when runs are triggered
 // out-of-band (a separate docker-exec process the daemon cannot wait() on), the
 // daemon polls the shared lock instead so a redeploy does not tear down a run
 // mid-flight. maxWait should be one run's own maximum lifetime; the container's

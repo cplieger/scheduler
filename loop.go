@@ -45,7 +45,7 @@ func RunLoop(ctx context.Context, job Job, opts LoopOptions) {
 		return
 	}
 
-	delay := nextDelay(opts.Interval, opts.Jitter)
+	delay := JitteredDelay(opts.Interval, opts.Jitter)
 	if opts.FireOnStart {
 		delay = 0
 	}
@@ -64,17 +64,8 @@ func RunLoop(ctx context.Context, job Job, opts LoopOptions) {
 			}
 			job(ctx)
 		}
-		delay = nextDelay(opts.Interval, opts.Jitter)
+		delay = JitteredDelay(opts.Interval, opts.Jitter)
 	}
-}
-
-// nextDelay returns the delay before the next tick: the bare interval when
-// jitter is disabled, otherwise a jittered value.
-func nextDelay(interval time.Duration, jitter float64) time.Duration {
-	if jitter <= 0 {
-		return interval
-	}
-	return JitteredDelay(interval, jitter)
 }
 
 // JitteredDelay returns a delay drawn uniformly from
@@ -87,6 +78,6 @@ func JitteredDelay(interval time.Duration, fraction float64) time.Duration {
 	}
 	spread := time.Duration(fraction * float64(interval))
 	span := max(2*spread, 1)
-	//nolint:gosec // G404: scheduling jitter, not a security-sensitive value.
+	// #nosec G404 -- scheduling jitter, not a security-sensitive value.
 	return interval - spread + time.Duration(rand.Int64N(int64(span)))
 }

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -65,5 +66,16 @@ func TestWaitForDrainCancelled(t *testing.T) {
 
 	if WaitForDrain(ctx, path, 5*time.Millisecond, 10*time.Second) {
 		t.Error("WaitForDrain(cancelled) = true, want false")
+	}
+}
+
+func TestWaitForDrainReturnsFalseOnLockError(t *testing.T) {
+	t.Parallel()
+	// An uncreatable lock path makes the first InFlight probe error, and
+	// WaitForDrain must give up (false) rather than poll until maxWait.
+	got := WaitForDrain(context.Background(),
+		filepath.Join(t.TempDir(), "missing-dir", ".lock"), 5*time.Millisecond, time.Second)
+	if got {
+		t.Error("WaitForDrain on an uncreatable lock path = true, want false")
 	}
 }
