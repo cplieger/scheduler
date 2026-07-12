@@ -128,6 +128,12 @@ for {
 }
 ```
 
+`RerunFlag` is a coalescing specialization of `Latch`, the bare single-bit
+cross-process marker (present on disk means raised). Use a `Latch` directly for
+one-off signals between processes that cannot signal each other, such as a
+daemon raising a shutdown/drain latch on `SIGTERM` that a separate `docker exec`
+child observes with `Raised()` and drains on.
+
 ## API
 
 - `Mode` — `ModeBuiltin`, `ModeExternal`, `ModeOnce` (implements `fmt.Stringer`).
@@ -141,6 +147,7 @@ for {
 - `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`.
 - `InFlight(path) (bool, error)`, `ReadHolder(path) (time.Time, bool)`.
 - `RerunFlag`, `NewRerunFlag(path)`, `.Set()`, `.Pending() bool`, `.Clear()`.
+- `Latch`, `NewLatch(path)`, `.Raise() error`, `.Raised() bool`, `.Clear()` — the bare single-bit cross-process marker behind `RerunFlag`, used directly for one-off signals such as a shutdown/drain latch.
 - `WaitForDrain(ctx, path, poll, maxWait) bool`, `DefaultDrainPoll`.
 - `CommandRunner`, `NewCommandRunner(grace) CommandRunner`, `DefaultGrace`.
 
@@ -153,7 +160,7 @@ absorbing them.
 
 | Feature | Rationale |
 | --- | --- |
-| Logging setup (slog handler, UTC time attr) | The composition root owns logging. The library logs interval warnings through `slog.Default()` (or `WithIntervalLogger`); it never configures a handler. |
+| Logging setup (slog handler, UTC time attr) | The composition root owns logging. The library logs interval warnings through `slog.Default()` (or `WithIntervalLogger`), plus a best-effort rerun-flag write-failure warning through `slog.Default()`; it never configures a handler. |
 | Health signaling | `Set(healthy)` is the app's call inside its job. Use the companion [`health`](https://github.com/cplieger/health) library for the marker; the two compose. |
 | What a job does / its outcome type | `Job` is `func(ctx)`. Exit codes, health flips, and log lines are the app's policy, wired inside the closure. |
 | Cron expressions / calendar schedules | This is interval + external-trigger scheduling. For `0 2 * * *` semantics, use an external scheduler (Ofelia, cron) in `ModeExternal`. |
