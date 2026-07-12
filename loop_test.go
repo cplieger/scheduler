@@ -103,3 +103,26 @@ func TestJitteredDelayWithinBand(t *testing.T) {
 		}
 	})
 }
+
+func TestRunLoopWithJitterTicks(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var fires atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		RunLoop(ctx, func(context.Context) { fires.Add(1) },
+			LoopOptions{Interval: 10 * time.Millisecond, Jitter: 0.10})
+		close(done)
+	}()
+	time.Sleep(75 * time.Millisecond)
+	cancel()
+	<-done
+
+	// Jitter keeps ticks within +/-10% of 10ms, so several fire in 75ms;
+	// a conservative floor stays robust under a loaded CI scheduler.
+	if got := fires.Load(); got < 2 {
+		t.Errorf("fires = %d, want >= 2 over 75ms at a jittered 10ms interval", got)
+	}
+}

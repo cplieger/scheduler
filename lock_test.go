@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -146,5 +147,43 @@ func TestRerunFlag(t *testing.T) {
 	flag.Clear()
 	if flag.Pending() {
 		t.Error("Pending() after a second Clear() = true, want false")
+	}
+}
+
+func TestReadHolderTornOrGarbageLine(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".torn.lock")
+	if err := os.WriteFile(path, []byte("not-a-timestamp\n"), 0o644); err != nil {
+		t.Fatalf("seeding lock file: %v", err)
+	}
+	since, known := ReadHolder(path)
+	if known {
+		t.Errorf("ReadHolder(garbage) known = true, want false")
+	}
+	if !since.IsZero() {
+		t.Errorf("ReadHolder(garbage) since = %s, want zero time", since)
+	}
+}
+
+func TestReadHolderUnreadablePath(t *testing.T) {
+	t.Parallel()
+	// Opening a directory succeeds but ReadAt fails with a non-EOF error, so
+	// ReadHolder must report the holder as unknown rather than parse garbage.
+	since, known := ReadHolder(t.TempDir())
+	if known {
+		t.Errorf("ReadHolder(directory) known = true, want false")
+	}
+	if !since.IsZero() {
+		t.Errorf("ReadHolder(directory) since = %s, want zero time", since)
+	}
+}
+
+func TestInFlightOpenError(t *testing.T) {
+	t.Parallel()
+	// A path whose parent does not exist cannot be opened, so InFlight must
+	// propagate the error rather than report the lock as free.
+	_, err := InFlight(filepath.Join(t.TempDir(), "missing-dir", ".lock"))
+	if err == nil {
+		t.Fatal("InFlight on an uncreatable path err = nil, want an error")
 	}
 }
