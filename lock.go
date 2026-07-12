@@ -3,6 +3,7 @@ package scheduler
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"syscall"
@@ -107,34 +108,35 @@ func writeHolder(f *os.File) {
 // trigger arrives while the lock is held, the loser sets the flag instead of
 // dropping the request, and the active holder — clearing the flag before each
 // run — reruns once on completion if it was set during the run. Any number of
-// overlapping triggers collapse into exactly one queued rerun.
+// overlapping triggers collapse into exactly one queued rerun. It is a Latch
+// specialized for that coalescing use.
 type RerunFlag struct {
-	path string
+	latch *Latch
 }
 
 // NewRerunFlag returns a RerunFlag backed by the file at path.
 func NewRerunFlag(path string) *RerunFlag {
-	return &RerunFlag{path: path}
+	return &RerunFlag{latch: NewLatch(path)}
 }
 
 // Set records that a rerun is pending. Idempotent: the flag is boolean, so any
 // number of overlapping triggers coalesce into one queued rerun. Best-effort —
 // a failed write defers the trigger to the next scheduled run.
 func (r *RerunFlag) Set() {
-	if f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY, 0o644); err == nil { // #nosec G304 -- caller-supplied trusted flag path
-		_ = f.Close()
+	if err := r.latch.Raise(); err != nil {
+		slog.Warn("rerun flag not set, trigger deferred to next scheduled run",
+			"path", r.latch.path, "error", err)
 	}
 }
 
 // Pending reports whether a rerun was queued (the flag file exists).
 func (r *RerunFlag) Pending() bool {
-	_, err := os.Stat(r.path)
-	return err == nil
+	return r.latch.Raised()
 }
 
 // Clear removes the flag. Call it before each run so only triggers arriving
 // during that run queue the next rerun (clearing before, not after, prevents
 // lost wakeups). Best-effort: a missing flag is already the desired state.
 func (r *RerunFlag) Clear() {
-	_ = os.Remove(r.path)
+	r.latch.Clear()
 }

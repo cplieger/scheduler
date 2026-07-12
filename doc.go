@@ -13,7 +13,9 @@
 //     testable core.
 //   - TryLock / Unlock / InFlight / ReadHolder are an advisory flock(2) overlap
 //     guard so a run and an out-of-band trigger never execute two jobs at once;
-//     RerunFlag coalesces a trigger that arrives mid-run into a single rerun.
+//     RerunFlag coalesces a trigger that arrives mid-run into a single rerun,
+//     and Latch is the bare single-bit cross-process marker behind it (used
+//     directly for one-off signals such as a shutdown/drain latch).
 //   - WaitForDrain polls the lock so a daemon can wait out an externally
 //     triggered run before exiting on shutdown.
 //   - NewCommandRunner builds context-cancellable subprocesses that shut down
