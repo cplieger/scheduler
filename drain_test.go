@@ -79,3 +79,22 @@ func TestWaitForDrainReturnsFalseOnLockError(t *testing.T) {
 		t.Error("WaitForDrain on an uncreatable lock path = true, want false")
 	}
 }
+
+func TestWaitForDrainDefaultPoll(t *testing.T) {
+	t.Parallel()
+	path := lockPath(t)
+	lock, ok, err := TryLock(path)
+	if err != nil || !ok {
+		t.Fatalf("TryLock = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+	go func() {
+		time.Sleep(DefaultDrainPoll + 100*time.Millisecond)
+		lock.Unlock()
+	}()
+
+	// A zero poll must fall back to DefaultDrainPoll; without the fallback
+	// time.NewTicker(0) panics. Reaching the polling loop proves the guard.
+	if !WaitForDrain(context.Background(), path, 0, 5*time.Second) {
+		t.Error("WaitForDrain(poll=0, released mid-wait) = false, want true")
+	}
+}

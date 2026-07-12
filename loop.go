@@ -76,6 +76,9 @@ func JitteredDelay(interval time.Duration, fraction float64) time.Duration {
 	if fraction <= 0 || interval <= 0 {
 		return interval
 	}
+	if fraction > 1 {
+		fraction = 1
+	}
 	spread := time.Duration(fraction * float64(interval))
 	span := max(2*spread, 1)
 	// #nosec G404 -- scheduling jitter, not a security-sensitive value.
