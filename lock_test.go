@@ -187,3 +187,30 @@ func TestInFlightOpenError(t *testing.T) {
 		t.Fatal("InFlight on an uncreatable path err = nil, want an error")
 	}
 }
+
+func TestWriteHolderTruncatesStaleTail(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".holder.lock")
+	// Seed a longer valid line than writeHolder produces, plus a tail. If
+	// writeHolder skipped Truncate, the shorter new line would leave the
+	// tail behind and ReadHolder would fail to parse the mixed content.
+	seed := "2099-12-31T23:59:59.999999999Z\nleftover-stale-tail-bytes\n"
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seeding lock file: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	writeHolder(f)
+
+	since, known := ReadHolder(path)
+	if !known {
+		t.Fatal("ReadHolder after writeHolder over a longer line: known = false, want true (stale tail not truncated)")
+	}
+	if d := time.Since(since); d < 0 || d > time.Minute {
+		t.Errorf("ReadHolder since = %s (age %s), want a fresh near-now timestamp", since, d)
+	}
+}

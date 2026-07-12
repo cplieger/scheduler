@@ -106,8 +106,12 @@ func WithIntervalLogger(l *slog.Logger) IntervalOption {
 //
 // def is the fallback cadence used for every non-positive outcome; it is also
 // carried on the returned Schedule in the external and once modes for
-// reference. Warnings are logged via slog.Default() unless WithIntervalLogger
-// is set.
+// reference. def must be positive: it becomes the Interval of every
+// ModeBuiltin result (empty, negative, or unparseable input), and the
+// library's invariant that a ModeBuiltin Schedule always carries a positive
+// Interval -- which lets RunLoop and time.NewTicker skip a non-positive-duration
+// guard -- holds only when def > 0. Warnings are logged via slog.Default()
+// unless WithIntervalLogger is set.
 func ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedule {
 	c := &intervalConfig{name: "interval", logger: slog.Default()}
 	for _, opt := range opts {

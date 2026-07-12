@@ -26,32 +26,24 @@ func WaitForDrain(ctx context.Context, path string, poll, maxWait time.Duration)
 		poll = DefaultDrainPoll
 	}
 
-	inFlight, err := InFlight(path)
-	if err != nil {
-		return false
-	}
-	if !inFlight {
-		return true
-	}
-
 	deadline := time.NewTimer(maxWait)
 	defer deadline.Stop()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	for {
+		inFlight, err := InFlight(path)
+		if err != nil {
+			return false
+		}
+		if !inFlight {
+			return true
+		}
 		select {
 		case <-ctx.Done():
 			return false
 		case <-deadline.C:
 			return false
 		case <-ticker.C:
-			inFlight, err := InFlight(path)
-			if err != nil {
-				return false
-			}
-			if !inFlight {
-				return true
-			}
 		}
 	}
 }
