@@ -73,10 +73,17 @@ func WithZeroAsOnce() IntervalOption {
 
 // WithBounds clamps a positive built-in interval to [low, high], logging a
 // warning when it adjusts the value. A non-positive bound is ignored, so
-// WithBounds(time.Minute, 0) enforces only a floor. Bounds never apply to the
-// external or once modes.
+// WithBounds(time.Minute, 0) enforces only a floor. If both bounds are
+// positive and high is lower than low, the pair is normalized so a swapped
+// argument order cannot produce an interval outside the intended band. Bounds
+// never apply to the external or once modes.
 func WithBounds(low, high time.Duration) IntervalOption {
-	return func(c *intervalConfig) { c.low, c.high = low, high }
+	return func(c *intervalConfig) {
+		if low > 0 && high > 0 && high < low {
+			low, high = high, low
+		}
+		c.low, c.high = low, high
+	}
 }
 
 // WithName sets the environment-variable name used in warning logs (for
@@ -109,9 +116,11 @@ func WithIntervalLogger(l *slog.Logger) IntervalOption {
 // reference. def must be positive: it becomes the Interval of every
 // ModeBuiltin result (empty, negative, or unparseable input), and the
 // library's invariant that a ModeBuiltin Schedule always carries a positive
-// Interval -- which lets RunLoop and time.NewTicker skip a non-positive-duration
-// guard -- holds only when def > 0. Warnings are logged via slog.Default()
-// unless WithIntervalLogger is set.
+// Interval -- which a consumer relies on when it passes the Interval straight to
+// time.NewTicker (which panics on a non-positive duration) -- holds only when
+// def > 0. (RunLoop itself also guards defensively, since a hand-built LoopOptions
+// can carry any Interval.) Warnings are logged via slog.Default() unless
+// WithIntervalLogger is set.
 func ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedule {
 	c := &intervalConfig{name: "interval", logger: slog.Default()}
 	for _, opt := range opts {

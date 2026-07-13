@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -147,6 +149,33 @@ func TestRerunFlag(t *testing.T) {
 	flag.Clear()
 	if flag.Pending() {
 		t.Error("Pending() after a second Clear() = true, want false")
+	}
+}
+
+// TestRerunFlagSetWarnsOnWriteFailure pins the best-effort contract of
+// RerunFlag.Set: when the marker write fails, Set must leave the flag
+// un-raised (Pending() false) and emit the deferred-trigger warning so an
+// operator learns the trigger was dropped. It forces Raise to fail by placing
+// the marker under a regular-file parent (ENOTDIR). It swaps slog.Default()
+// globally, so it must NOT call t.Parallel().
+func TestRerunFlagSetWarnsOnWriteFailure(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding a non-directory parent: %v", err)
+	}
+	flag := NewRerunFlag(filepath.Join(notADir, ".rerun"))
+	flag.Set()
+
+	if flag.Pending() {
+		t.Error("Pending() = true after a failed Set(), want false (the marker was never written)")
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("rerun flag not set")) {
+		t.Errorf("Set() failure log = %q, want the deferred-trigger warning", buf.String())
 	}
 }
 

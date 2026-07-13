@@ -7,9 +7,10 @@ import (
 
 // FuzzParseInterval asserts the two invariants every caller relies on, against
 // arbitrary env values: the returned Mode is always one of the three defined
-// modes, and a built-in schedule always carries a positive interval (RunLoop
-// and time.NewTicker panic on a non-positive duration, so ParseInterval is the
-// sole gate protecting them from a malformed env value).
+// modes, and a built-in schedule always carries a positive interval (time.NewTicker
+// panics on a non-positive duration and a consumer may pass a built-in interval
+// straight to it, so ParseInterval is the sole gate protecting it from a malformed
+// env value).
 func FuzzParseInterval(f *testing.F) {
 	for _, seed := range []string{
 		"", "   ", "6h", "45m", "1h30m", "off", "OFF", "disabled",

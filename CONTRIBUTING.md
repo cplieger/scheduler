@@ -94,9 +94,10 @@ golangci-lint fmt
 
 `FuzzParseInterval` (in `interval_fuzz_test.go`) is the untrusted-input boundary
 — it asserts the parser never panics, always returns a defined `Mode`, and never
-yields a built-in schedule with a non-positive interval (which would panic
-`RunLoop` / `time.NewTicker`). Run it with a time budget, and add a seed for any
-new parsing edge:
+yields a built-in schedule with a non-positive interval (which `time.NewTicker`
+panics on — a consumer may pass a built-in interval straight to it, so
+`ParseInterval` is the sole gate; `RunLoop` itself also guards defensively). Run
+it with a time budget, and add a seed for any new parsing edge:
 
 ```sh
 go test -run='^$' -fuzz=FuzzParseInterval -fuzztime=30s .
