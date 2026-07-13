@@ -145,3 +145,16 @@ func TestModeString(t *testing.T) {
 		}
 	}
 }
+
+func TestParseIntervalBoundsSwapped(t *testing.T) {
+	t.Parallel()
+	got := ParseInterval("30m", testDefault,
+		WithBounds(time.Hour, time.Minute), WithIntervalLogger(silentLogger()))
+	if got.Mode != ModeBuiltin {
+		t.Fatalf("ParseInterval(%q, swapped bounds).Mode = %s, want built-in", "30m", got.Mode)
+	}
+	if got.Interval != 30*time.Minute {
+		t.Errorf("ParseInterval(%q, WithBounds(1h,1m)).Interval = %s, want %s "+
+			"(swapped bounds must normalize to [1m,1h])", "30m", got.Interval, 30*time.Minute)
+	}
+}

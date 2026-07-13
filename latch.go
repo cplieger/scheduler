@@ -19,7 +19,10 @@ type Latch struct {
 	path string
 }
 
-// NewLatch returns a Latch backed by the marker file at path.
+// NewLatch returns a Latch backed by the marker file at path. Place path in a
+// directory not writable by untrusted local users: Raise opens the marker file
+// following symlinks, so it may create or open a target chosen by an attacker
+// rather than the intended marker.
 func NewLatch(path string) *Latch {
 	return &Latch{path: path}
 }

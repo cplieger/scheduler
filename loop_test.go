@@ -126,3 +126,18 @@ func TestRunLoopWithJitterTicks(t *testing.T) {
 		t.Errorf("fires = %d, want >= 2 over 75ms at a jittered 10ms interval", got)
 	}
 }
+
+func TestJitteredDelayClampsFractionAboveOne(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(t *rapid.T) {
+		interval := time.Duration(rapid.Int64Range(1, int64(24*time.Hour)).Draw(t, "interval"))
+		fraction := rapid.Float64Range(1.0, 100.0).Draw(t, "fraction")
+
+		got := JitteredDelay(interval, fraction)
+
+		if got < 0 || got >= 2*interval {
+			t.Fatalf("JitteredDelay(%s, %v) = %s, want within [0, %s) (fraction clamped to 1)",
+				interval, fraction, got, 2*interval)
+		}
+	})
+}

@@ -25,6 +25,13 @@ type Lock struct {
 // lock (a run is already in flight); the caller must release an acquired lock
 // with Unlock. On acquisition it records the current time in the file so a
 // later contender can read the holder's age via ReadHolder.
+//
+// Place path in a directory not writable by untrusted local users (e.g. a
+// container-private /tmp or a service-owned dir, not a world-writable host
+// /tmp shared with other accounts): the file is opened following symlinks and
+// its holder timestamp is written with Truncate, so a pre-planted symlink at
+// path would be clobbered. Callers that must harden further can place path
+// under a 0700 service-owned directory.
 func TryLock(path string) (l *Lock, ok bool, err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644) // #nosec G304 -- caller-supplied trusted lock path
 	if err != nil {
@@ -114,7 +121,10 @@ type RerunFlag struct {
 	latch *Latch
 }
 
-// NewRerunFlag returns a RerunFlag backed by the file at path.
+// NewRerunFlag returns a RerunFlag backed by the file at path. Place path in a
+// directory not writable by untrusted local users: Set opens the marker file
+// following symlinks, so it may create or open a target chosen by an attacker
+// rather than the intended marker.
 func NewRerunFlag(path string) *RerunFlag {
 	return &RerunFlag{latch: NewLatch(path)}
 }
