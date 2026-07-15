@@ -19,6 +19,9 @@ its own:
   pure ±band core, split out so it can be property-tested directly.
 - **`TryLock` / `Unlock` / `InFlight` / `ReadHolder` / `RerunFlag`** — the
   `flock(2)` overlap guard and its rerun-coalescing companion.
+- **`Exclusive`** — cross-process run coalescing over the lock + a queue
+  counter: `Run` (queue mode, demand-driven callers) and `RunOrSkip` (skip
+  mode, loop ticks), with a bounded rerun queue (`WithQueueCapacity`).
 - **`WaitForDrain`** — the external-mode shutdown drain (poll the lock so a
   daemon waits out a `docker exec` run it cannot `wait()` on).
 - **`NewCommandRunner`** — context-cancellable subprocesses that get SIGTERM
@@ -57,6 +60,12 @@ The whole surface is small; keep it that way.
 - `Job`, `LoopOptions`, `RunLoop`, `JitteredDelay`.
 - `Lock`, `TryLock`, `(*Lock).Unlock`, `InFlight`, `ReadHolder`.
 - `RerunFlag`, `NewRerunFlag`, `.Set` / `.Pending` / `.Clear`.
+- `Exclusive`, `NewExclusive`, `.Run` / `.RunOrSkip` / `.Pending`, the
+  `WithQueueCapacity` option, `Outcome`, and the `ExclusiveLockName` /
+  `ExclusiveQueueName` file-name constants. Its five log messages
+  (queued / discarding / skipping tick / running queued / stale marker
+  cleared) are a pinned contract — tests assert the exact text, and consumers
+  alert on them in Loki; changing one is a breaking change.
 - `WaitForDrain`, `DefaultDrainPoll`.
 - `CommandRunner`, `NewCommandRunner`, `DefaultGrace`.
 
@@ -123,6 +132,11 @@ cases:
 - `loop_test.go` — `RunLoop` fire-on-start / repeated ticks / drain / guards,
   and the `rapid` property that `JitteredDelay` stays within its ±band.
 - `lock_test.go` — mutual exclusion, `InFlight`, `ReadHolder`, `RerunFlag`.
+- `exclusive_test.go` — `Exclusive` queue/skip modes: acquire, queue, discard,
+  capacity bounds, consume loop, stale-marker clear, error joining, the
+  pinned log contract, a no-overlap hammer, and the crash-release proof (a
+  re-exec'd child holding the lock is SIGKILLed and the flock must die with
+  it).
 - `drain_test.go` — `WaitForDrain` not-in-flight / drained / timeout / cancel.
 - `command_test.go` — runner construction, default grace, and the SIGTERM-on-cancel
   proof (a child that traps TERM and exits 42).

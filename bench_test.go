@@ -32,3 +32,14 @@ func BenchmarkTryLock(b *testing.B) {
 		lock.Unlock()
 	}
 }
+
+func BenchmarkExclusiveRun(b *testing.B) {
+	e := NewExclusive(b.TempDir(), silentLogger())
+	job := func() error { return nil }
+	b.ReportAllocs()
+	for b.Loop() {
+		if out, err := e.Run(job); err != nil || out != OutcomeRan {
+			b.Fatalf("Run = (%s, %v), want (ran, nil)", out, err)
+		}
+	}
+}

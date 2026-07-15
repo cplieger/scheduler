@@ -16,6 +16,11 @@
 //     RerunFlag coalesces a trigger that arrives mid-run into a single rerun,
 //     and Latch is the bare single-bit cross-process marker behind it (used
 //     directly for one-off signals such as a shutdown/drain latch).
+//   - Exclusive composes the pieces above into Renovate-style run coalescing
+//     for whole cycles: at most one cycle runs at a time across processes, a
+//     requester that finds a run in flight queues a rerun request (bounded, no
+//     blocked waiters) or skips its tick, and the runner executes the queued
+//     demand when the current run finishes.
 //   - WaitForDrain polls the lock so a daemon can wait out an externally
 //     triggered run before exiting on shutdown.
 //   - NewCommandRunner builds context-cancellable subprocesses that shut down
