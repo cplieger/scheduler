@@ -123,7 +123,10 @@ func TestParseIntervalClampWarns(t *testing.T) {
 
 func TestParseIntervalRedactedValue(t *testing.T) {
 	t.Parallel()
-	secret := "hunter2-api-key"
+	// A config typo can land an expanded credential in the interval field; the
+	// fixture is deliberately NOT credential-shaped so secret scanners don't
+	// flag the test file itself, but the assertion contract is identical.
+	misplaced := "hunter2-not-a-duration"
 	cases := []struct {
 		name        string
 		raw         string
@@ -133,8 +136,8 @@ func TestParseIntervalRedactedValue(t *testing.T) {
 		wantMode    Mode
 	}{
 		{
-			name: "unparseable secret stays out of the log", raw: secret,
-			wantMessage: "cannot parse interval", wantAbsent: secret, wantMode: ModeBuiltin,
+			name: "unparseable secret stays out of the log", raw: misplaced,
+			wantMessage: "cannot parse interval", wantAbsent: misplaced, wantMode: ModeBuiltin,
 		},
 		{
 			name: "negative value is omitted", raw: "-5m",
