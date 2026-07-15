@@ -54,11 +54,12 @@ type Schedule struct {
 
 // intervalConfig is the resolved set of ParseInterval options.
 type intervalConfig struct {
-	logger     *slog.Logger
-	name       string
-	low        time.Duration
-	high       time.Duration
-	zeroAsOnce bool
+	logger      *slog.Logger
+	name        string
+	low         time.Duration
+	high        time.Duration
+	zeroAsOnce  bool
+	redactValue bool
 }
 
 // IntervalOption configures ParseInterval.
@@ -91,6 +92,19 @@ func WithBounds(low, high time.Duration) IntervalOption {
 // rejected. It defaults to "interval".
 func WithName(name string) IntervalOption {
 	return func(c *intervalConfig) { c.name = name }
+}
+
+// WithRedactedValue keeps the raw interval value out of ParseInterval's
+// warnings, making them field-name-only. Use it when the value passes through
+// secret-capable config expansion (a YAML file with ${VAR} references): a
+// config typo can place an expanded secret in the interval field, and the
+// default unparseable-value warning would echo it to the startup log. Only the
+// unparseable warning can ever carry such a value — a negative or clamped
+// value necessarily parsed as a duration — but with this option every warning
+// omits the supplied value (the clamp warning keeps the resulting bound), so
+// the redaction contract is uniform rather than per-branch.
+func WithRedactedValue() IntervalOption {
+	return func(c *intervalConfig) { c.redactValue = true }
 }
 
 // WithIntervalLogger routes ParseInterval's warnings to a specific logger
@@ -138,8 +152,7 @@ func ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedu
 
 	d, err := time.ParseDuration(trimmed)
 	if err != nil {
-		c.logger.Warn("cannot parse interval, using default",
-			"name", c.name, "value", raw, "default", def.String())
+		c.warnFallback("cannot parse interval, using default", raw, def)
 		return Schedule{Interval: def, Mode: ModeBuiltin}
 	}
 	switch {
@@ -151,14 +164,27 @@ func ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedu
 		}
 		return Schedule{Interval: def, Mode: ModeExternal}
 	default:
-		c.logger.Warn("interval is negative, using default",
-			"name", c.name, "value", raw, "default", def.String())
+		c.warnFallback("interval is negative, using default", raw, def)
 		return Schedule{Interval: def, Mode: ModeBuiltin}
 	}
 }
 
+// warnFallback logs a fallback-to-default warning, echoing the supplied raw
+// value only when WithRedactedValue is not set (an expanded secret misplaced
+// in the interval field must never reach the log).
+func (c *intervalConfig) warnFallback(msg, raw string, def time.Duration) {
+	if c.redactValue {
+		c.logger.Warn(msg, "name", c.name, "default", def.String())
+		return
+	}
+	c.logger.Warn(msg, "name", c.name, "value", raw, "default", def.String())
+}
+
 // clamp bounds a positive interval to the configured [low, high], logging when
-// it adjusts. A non-positive bound is treated as unset.
+// it adjusts. A non-positive bound is treated as unset. Under WithRedactedValue
+// the warning omits the requested duration and keeps only the applied bound
+// (the requested value parsed as a duration so it cannot be a secret, but the
+// option's contract is that no supplied value is echoed).
 func (c *intervalConfig) clamp(d time.Duration) time.Duration {
 	clamped := d
 	if c.low > 0 && clamped < c.low {
@@ -168,8 +194,12 @@ func (c *intervalConfig) clamp(d time.Duration) time.Duration {
 		clamped = c.high
 	}
 	if clamped != d {
-		c.logger.Warn("interval clamped",
-			"name", c.name, "requested", d.String(), "clamped_to", clamped.String())
+		if c.redactValue {
+			c.logger.Warn("interval clamped", "name", c.name, "clamped_to", clamped.String())
+		} else {
+			c.logger.Warn("interval clamped",
+				"name", c.name, "requested", d.String(), "clamped_to", clamped.String())
+		}
 	}
 	return clamped
 }

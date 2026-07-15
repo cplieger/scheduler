@@ -121,6 +121,71 @@ func TestParseIntervalClampWarns(t *testing.T) {
 	}
 }
 
+func TestParseIntervalRedactedValue(t *testing.T) {
+	t.Parallel()
+	secret := "hunter2-api-key"
+	cases := []struct {
+		name        string
+		raw         string
+		opts        []IntervalOption
+		wantMessage string
+		wantAbsent  string
+		wantMode    Mode
+	}{
+		{
+			name: "unparseable secret stays out of the log", raw: secret,
+			wantMessage: "cannot parse interval", wantAbsent: secret, wantMode: ModeBuiltin,
+		},
+		{
+			name: "negative value is omitted", raw: "-5m",
+			wantMessage: "interval is negative", wantAbsent: "-5m", wantMode: ModeBuiltin,
+		},
+		{
+			name: "clamp omits the requested duration", raw: "1s",
+			opts:        []IntervalOption{WithBounds(time.Minute, time.Hour)},
+			wantMessage: "interval clamped", wantAbsent: "1s", wantMode: ModeBuiltin,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, nil))
+			opts := append([]IntervalOption{
+				WithRedactedValue(), WithIntervalLogger(logger), WithName("TEST_INTERVAL"),
+			}, tc.opts...)
+			got := ParseInterval(tc.raw, testDefault, opts...)
+			out := buf.String()
+			if !strings.Contains(out, tc.wantMessage) {
+				t.Errorf("ParseInterval(%q) log = %q, want it to contain %q", tc.raw, out, tc.wantMessage)
+			}
+			if strings.Contains(out, tc.wantAbsent) {
+				t.Errorf("ParseInterval(%q) log = %q, must not echo the supplied value %q", tc.raw, out, tc.wantAbsent)
+			}
+			if !strings.Contains(out, "TEST_INTERVAL") {
+				t.Errorf("ParseInterval(%q) log = %q, want the field-name-only warning to still name the field", tc.raw, out)
+			}
+			if got.Mode != tc.wantMode {
+				t.Errorf("ParseInterval(%q) mode = %v, want %v (redaction must not change parsing)", tc.raw, got.Mode, tc.wantMode)
+			}
+		})
+	}
+}
+
+func TestParseIntervalRedactedClampKeepsBound(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	got := ParseInterval("1s", testDefault,
+		WithRedactedValue(), WithBounds(time.Minute, time.Hour), WithIntervalLogger(logger))
+	if got.Interval != time.Minute {
+		t.Errorf("clamped Interval = %v, want %v (redaction must not change clamping)", got.Interval, time.Minute)
+	}
+	if !strings.Contains(buf.String(), "clamped_to=1m0s") {
+		t.Errorf("redacted clamp log = %q, want it to keep the applied bound clamped_to=1m0s", buf.String())
+	}
+}
+
 func TestParseIntervalValidInputDoesNotWarn(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
