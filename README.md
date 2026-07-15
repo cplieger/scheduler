@@ -107,7 +107,11 @@ func runPass(ctx context.Context) {
 
 Options: `WithZeroAsOnce()` (treat a zero duration as run-once), `WithBounds(low, high)`
 (clamp a positive cadence), `WithName(env)` (name the variable in warnings),
-`WithIntervalLogger(l)` (route warnings to a specific logger; defaults to `slog.Default()`).
+`WithIntervalLogger(l)` (route warnings to a specific logger; defaults to `slog.Default()`),
+`WithRedactedValue()` (keep the supplied raw value out of every warning — use when the
+interval passes through secret-capable config expansion, where a config typo could place
+an expanded secret in the field; plain env-var reads should keep the default echo,
+it is useful diagnostics).
 
 ### Overlap guard and coalescing
 
