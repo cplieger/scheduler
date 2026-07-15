@@ -2,6 +2,7 @@ package scheduler_test
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -19,6 +20,24 @@ func ExampleParseInterval() {
 	// built-in every 30m0s
 	// external
 	// once
+}
+
+func ExampleExclusive() {
+	dir, err := os.MkdirTemp("", "scheduler_example_exclusive")
+	if err != nil {
+		return
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	ex := scheduler.NewExclusive(dir, slog.New(slog.DiscardHandler))
+	outcome, _ := ex.Run(func() error {
+		fmt.Println("cycle ran")
+		return nil
+	})
+	fmt.Println("outcome:", outcome)
+	// Output:
+	// cycle ran
+	// outcome: ran
 }
 
 func ExampleTryLock() {

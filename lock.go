@@ -33,7 +33,7 @@ type Lock struct {
 // path would be clobbered. Callers that must harden further can place path
 // under a 0700 service-owned directory.
 func TryLock(path string) (l *Lock, ok bool, err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644) // #nosec G304 -- caller-supplied trusted lock path
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644) // #nosec G304 G703 -- caller-supplied trusted lock path
 	if err != nil {
 		return nil, false, err
 	}

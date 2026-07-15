@@ -138,12 +138,55 @@ one-off signals between processes that cannot signal each other, such as a
 daemon raising a shutdown/drain latch on `SIGTERM` that a separate `docker exec`
 child observes with `Raised()` and drains on.
 
+### Run coalescing across processes
+
+`Exclusive` packages the lock + queue pattern into Renovate's run-coalescing
+model for a whole app: at most one cycle runs at a time per instance, across
+every entry point (the resident daemon's tick, a `poll` subcommand exec'd by an
+operator or an external scheduler). A request that arrives while a cycle runs
+is queued — without a blocked process: the requester records a rerun request in
+a counter file and exits immediately, and the active runner executes the queued
+demand when the current run finishes. Requests beyond the queue capacity
+(default 1, set with `WithQueueCapacity`) are discarded, because the queued
+rerun already guarantees a run starts after they arrived.
+
+The two entry points pair as queue mode for demand-driven callers and skip mode
+for time-driven ticks:
+
+```go
+ex := scheduler.NewExclusive("/config", logger)
+
+// Daemon: RunLoop ticks use skip mode — a busy lock means the job is already
+// running, and the next tick provides freshness; never queue a tick.
+scheduler.RunLoop(ctx, func(ctx context.Context) {
+	_, _ = ex.RunOrSkip(func() error { return runCycle(ctx) })
+}, scheduler.LoopOptions{Interval: sched.Interval, FireOnStart: true})
+
+// Poll subcommand (exec'd by an operator or an external scheduler): queue
+// mode — the request must be satisfied by a run that starts after it arrived.
+outcome, err := ex.Run(func() error { return runCycle(ctx) })
+switch outcome {
+case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
+	os.Exit(0) // the in-flight runner covers this request; nothing to wait for
+default:
+	if err != nil {
+		os.Exit(1)
+	}
+}
+```
+
+The lock is a `flock(2)` (`cycle.lock` in the directory), so the kernel
+releases it when the holding process dies — a crashed run never wedges the
+scheduler, and a queue counter orphaned by a crash is cleared at the next
+acquisition. `Pending` reports the queued-request count for observability, and
+`ReadHolder` on `ExclusiveLockName` reports how long the current cycle has run.
+
 ## API
 
 - `Mode` — `ModeBuiltin`, `ModeExternal`, `ModeOnce` (implements `fmt.Stringer`).
 - `Schedule` — `{Interval, Mode}` returned by `ParseInterval`.
 - `ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedule`.
-- `WithZeroAsOnce()`, `WithBounds(low, high)`, `WithName(name)`, `WithIntervalLogger(l)` — interval options.
+- `WithZeroAsOnce()`, `WithBounds(low, high)`, `WithName(name)`, `WithIntervalLogger(l)`, `WithRedactedValue()` — interval options.
 - `Job` — `func(ctx context.Context)`, one unit of scheduled work.
 - `LoopOptions` — `{Interval, Jitter, FireOnStart}`.
 - `RunLoop(ctx, job, opts)` — sequential startup-plus-ticker loop; drains on cancellation.
@@ -152,6 +195,10 @@ child observes with `Raised()` and drains on.
 - `InFlight(path) (bool, error)`, `ReadHolder(path) (time.Time, bool)`.
 - `RerunFlag`, `NewRerunFlag(path)`, `.Set()`, `.Pending() bool`, `.Clear()`.
 - `Latch`, `NewLatch(path)`, `.Raise() error`, `.Raised() bool`, `.Clear()` — the bare single-bit cross-process marker behind `RerunFlag`, used directly for one-off signals such as a shutdown/drain latch.
+- `Exclusive`, `NewExclusive(dir, logger, opts...)`, `.Run(job) (Outcome, error)` (queue mode), `.RunOrSkip(job) (Outcome, error)` (skip mode), `.Pending() (int, error)` — cross-process run coalescing.
+- `WithQueueCapacity(n)` — Exclusive option: how many rerun requests may queue (default 1).
+- `Outcome` — `OutcomeRan`, `OutcomeRanQueued`, `OutcomeQueued`, `OutcomeDiscarded`, `OutcomeSkipped`, `OutcomeNone` (implements `fmt.Stringer`).
+- `ExclusiveLockName`, `ExclusiveQueueName` — the file names Exclusive maintains inside its directory.
 - `WaitForDrain(ctx, path, poll, maxWait) bool`, `DefaultDrainPoll`.
 - `CommandRunner`, `NewCommandRunner(grace) CommandRunner`, `DefaultGrace`.
 
@@ -164,7 +211,7 @@ absorbing them.
 
 | Feature | Rationale |
 | --- | --- |
-| Logging setup (slog handler, UTC time attr) | The composition root owns logging. The library logs interval warnings through `slog.Default()` (or `WithIntervalLogger`), plus a best-effort rerun-flag write-failure warning through `slog.Default()`; it never configures a handler. |
+| Logging setup (slog handler, UTC time attr) | The composition root owns logging. The library logs interval warnings through `slog.Default()` (or `WithIntervalLogger`), a best-effort rerun-flag write-failure warning through `slog.Default()`, and `Exclusive`'s coalescing lines through its injected logger (nil falls back to `slog.Default()`); it never configures a handler. |
 | Health signaling | `Set(healthy)` is the app's call inside its job. Use the companion [`health`](https://github.com/cplieger/health) library for the marker; the two compose. |
 | What a job does / its outcome type | `Job` is `func(ctx)`. Exit codes, health flips, and log lines are the app's policy, wired inside the closure. |
 | Cron expressions / calendar schedules | This is interval + external-trigger scheduling. For `0 2 * * *` semantics, use an external scheduler (Ofelia, cron) in `ModeExternal`. |
