@@ -23,7 +23,7 @@ the app (health is the companion library for the marker pattern).
 ## Install
 
 ```sh
-go get github.com/cplieger/scheduler@latest
+go get github.com/cplieger/scheduler/v2@latest
 ```
 
 ## Usage
@@ -41,7 +41,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/scheduler"
+	"github.com/cplieger/scheduler/v2"
 )
 
 const lockPath = "/tmp/.myjob.lock"
@@ -117,32 +117,22 @@ it is useful diagnostics).
 
 `TryLock` / `Unlock` serialize runs across both the in-process loop and an
 out-of-band `docker exec` trigger. `InFlight` probes whether a run holds the
-lock; `ReadHolder` reads how long it has held it (observability only). For a
-trigger that arrives mid-run, `RerunFlag` coalesces any number of overlapping
-triggers into exactly one queued rerun:
+lock; `ReadHolder` reads how long it has held it (observability only). A
+trigger that arrives mid-run is not dropped: `Exclusive` (next section) queues
+it as a coalesced rerun.
 
-```go
-flag := scheduler.NewRerunFlag("/tmp/.myjob.rerun")
-for {
-	flag.Clear()      // clear before the run so only triggers during it queue a rerun
-	runOnce(ctx)
-	if !flag.Pending() {
-		break
-	}
-}
-```
-
-`RerunFlag` is a coalescing specialization of `Latch`, the bare single-bit
-cross-process marker (present on disk means raised). Use a `Latch` directly for
-one-off signals between processes that cannot signal each other, such as a
-daemon raising a shutdown/drain latch on `SIGTERM` that a separate `docker exec`
-child observes with `Raised()` and drains on.
+`Latch` is the bare single-bit cross-process marker (present on disk means
+raised). Use it for one-off signals between processes that cannot signal each
+other, such as a daemon raising a shutdown/drain latch on `SIGTERM` that a
+separate `docker exec` child observes with `Raised()` and drains on — and wire
+that latch into `Exclusive` through `WithGate` so queued reruns stop launching
+once shutdown is signalled.
 
 ### Run coalescing across processes
 
-`Exclusive` packages the lock + queue pattern into Renovate's run-coalescing
-model for a whole app: at most one cycle runs at a time per instance, across
-every entry point (the resident daemon's tick, a `poll` subcommand exec'd by an
+`Exclusive` packages the lock + queue pattern into cross-process run coalescing
+for a whole app: at most one cycle runs at a time per instance, across every
+entry point (the resident daemon's tick, a `poll` subcommand exec'd by an
 operator or an external scheduler). A request that arrives while a cycle runs
 is queued — without a blocked process: the requester records a rerun request in
 a counter file and exits immediately, and the active runner executes the queued
@@ -181,6 +171,36 @@ scheduler, and a queue counter orphaned by a crash is cleared at the next
 acquisition. `Pending` reports the queued-request count for observability, and
 `ReadHolder` on `ExclusiveLockName` reports how long the current cycle has run.
 
+Three policy edges are deliberate, and all deferral is demand-preserving (the
+queue counter survives; the next run satisfies it):
+
+- A failed run does not stop queued demand by default — each queued request is
+  owed a run, succeed or fail. `WithStopOnError()` opts into the opposite:
+  after a failed run the holder retires (warning `cycle failed; deferring
+  queued demand`) instead of hammering a failing job.
+- `WithGate(func() bool)` puts the composition root's shutdown signal (a
+  context, a drain latch) in front of every run start: a gated initial run
+  returns `OutcomeGated` (`cycle gate closed; skipping run`), and queued
+  demand behind a closed gate defers (`cycle gate closed; deferring queued
+  demand`) — an in-flight run is never interrupted, and a stop request is
+  never followed by a fresh run.
+- A holder executes at most 8 queued reruns per acquisition: past that cap it
+  retires (warning `rerun cap reached; deferring queued demand`), so a
+  relentless trigger source cannot pin one holder indefinitely. Each rerun's
+  `running queued cycle request` line carries an `attempt` ordinal for log
+  attribution.
+
+The storage under the queue counter is exported as `SlotFile`: a single-slot
+byte payload shared across processes through one file, mutated by atomic
+read-modify-write transactions under a short exclusive `flock` on the file
+itself. Build on it when your coalescing state needs a payload the counter
+cannot carry — docker-renovate-scheduler records *which repos* a queued
+trigger wants, so a full-fleet request queued behind a scoped run reruns
+unscoped. The bytes' meaning, how concurrent demands merge, and when recorded
+demand counts as served are deliberately the caller's parser and policy;
+`SlotFile` owns only the transaction (create-on-first-use, blocking lock,
+skip-if-unchanged write, never unlink a live slot).
+
 ## API
 
 - `Mode` — `ModeBuiltin`, `ModeExternal`, `ModeOnce` (implements `fmt.Stringer`).
@@ -193,11 +213,11 @@ acquisition. `Pending` reports the queued-request count for observability, and
 - `JitteredDelay(interval, fraction) time.Duration` — the pure ±band jitter core.
 - `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`.
 - `InFlight(path) (bool, error)`, `ReadHolder(path) (time.Time, bool)`.
-- `RerunFlag`, `NewRerunFlag(path)`, `.Set()`, `.Pending() bool`, `.Clear()`.
-- `Latch`, `NewLatch(path)`, `.Raise() error`, `.Raised() bool`, `.Clear()` — the bare single-bit cross-process marker behind `RerunFlag`, used directly for one-off signals such as a shutdown/drain latch.
+- `Latch`, `NewLatch(path)`, `.Raise() error`, `.Raised() bool`, `.Clear()` — the bare single-bit cross-process marker, used for one-off signals such as a shutdown/drain latch.
 - `Exclusive`, `NewExclusive(dir, logger, opts...)`, `.Run(job) (Outcome, error)` (queue mode), `.RunOrSkip(job) (Outcome, error)` (skip mode), `.Pending() (int, error)` — cross-process run coalescing.
-- `WithQueueCapacity(n)` — Exclusive option: how many rerun requests may queue (default 1).
-- `Outcome` — `OutcomeRan`, `OutcomeRanQueued`, `OutcomeQueued`, `OutcomeDiscarded`, `OutcomeSkipped`, `OutcomeNone` (implements `fmt.Stringer`).
+- `WithQueueCapacity(n)`, `WithGate(func() bool)`, `WithStopOnError()` — Exclusive options: queue depth (default 1), a pre-run shutdown gate, and fail-fast rerun deferral.
+- `SlotFile`, `NewSlotFile(path)`, `.Mutate(fn func(before []byte) []byte) ([]byte, error)` — the flock'd single-slot read-modify-write transaction behind Exclusive's counter, exported for app-defined coalescing payloads.
+- `Outcome` — `OutcomeRan`, `OutcomeRanQueued`, `OutcomeQueued`, `OutcomeDiscarded`, `OutcomeSkipped`, `OutcomeGated`, `OutcomeNone` (implements `fmt.Stringer`).
 - `ExclusiveLockName`, `ExclusiveQueueName` — the file names Exclusive maintains inside its directory.
 - `WaitForDrain(ctx, path, poll, maxWait) bool`, `DefaultDrainPoll`.
 - `CommandRunner`, `NewCommandRunner(grace) CommandRunner`, `DefaultGrace`.
@@ -211,7 +231,7 @@ absorbing them.
 
 | Feature | Rationale |
 | --- | --- |
-| Logging setup (slog handler, UTC time attr) | The composition root owns logging. The library logs interval warnings through `slog.Default()` (or `WithIntervalLogger`), a best-effort rerun-flag write-failure warning through `slog.Default()`, and `Exclusive`'s coalescing lines through its injected logger (nil falls back to `slog.Default()`); it never configures a handler. |
+| Logging setup (slog handler, UTC time attr) | The composition root owns logging. The library logs interval warnings through `slog.Default()` (or `WithIntervalLogger`) and `Exclusive`'s coalescing lines through its injected logger (nil falls back to `slog.Default()`); it never configures a handler. |
 | Health signaling | `Set(healthy)` is the app's call inside its job. Use the companion [`health`](https://github.com/cplieger/health) library for the marker; the two compose. |
 | What a job does / its outcome type | `Job` is `func(ctx)`. Exit codes, health flips, and log lines are the app's policy, wired inside the closure. |
 | Cron expressions / calendar schedules | This is interval + external-trigger scheduling. For `0 2 * * *` semantics, use an external scheduler (Ofelia, cron) in `ModeExternal`. |

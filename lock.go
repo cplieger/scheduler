@@ -3,7 +3,6 @@ package scheduler
 import (
 	"errors"
 	"io"
-	"log/slog"
 	"os"
 	"strings"
 	"syscall"
@@ -61,6 +60,15 @@ func (l *Lock) Unlock() {
 // (not in flight); a held lock reports in flight. Because flock releases when
 // the holding process exits, a crashed run never reports as perpetually in
 // flight.
+//
+// The probe's momentary acquisition is visible to concurrent lockers: a
+// TryLock racing an InFlight probe can lose to it and observe busy while no
+// run is actually in flight. A pure observer (WaitForDrain, status reporting)
+// at worst re-polls one interval later; a trigger that RECORDS demand on a
+// busy result (queueing a rerun marker, say) should re-probe once after
+// recording — otherwise the recorded demand can sit unconsumed until the next
+// scheduled run — or use Exclusive, whose enqueue-then-re-probe closes that
+// window.
 func InFlight(path string) (inFlight bool, err error) {
 	l, ok, err := TryLock(path)
 	if err != nil {
@@ -109,44 +117,4 @@ func writeHolder(f *os.File) {
 		return
 	}
 	_, _ = f.WriteAt([]byte(line), 0)
-}
-
-// RerunFlag is a single-slot coalescing flag that pairs with a Lock: when a
-// trigger arrives while the lock is held, the loser sets the flag instead of
-// dropping the request, and the active holder — clearing the flag before each
-// run — reruns once on completion if it was set during the run. Any number of
-// overlapping triggers collapse into exactly one queued rerun. It is a Latch
-// specialized for that coalescing use.
-type RerunFlag struct {
-	latch *Latch
-}
-
-// NewRerunFlag returns a RerunFlag backed by the file at path. Place path in a
-// directory not writable by untrusted local users: Set opens the marker file
-// following symlinks, so it may create or open a target chosen by an attacker
-// rather than the intended marker.
-func NewRerunFlag(path string) *RerunFlag {
-	return &RerunFlag{latch: NewLatch(path)}
-}
-
-// Set records that a rerun is pending. Idempotent: the flag is boolean, so any
-// number of overlapping triggers coalesce into one queued rerun. Best-effort —
-// a failed write defers the trigger to the next scheduled run.
-func (r *RerunFlag) Set() {
-	if err := r.latch.Raise(); err != nil {
-		slog.Warn("rerun flag not set, trigger deferred to next scheduled run",
-			"path", r.latch.path, "error", err)
-	}
-}
-
-// Pending reports whether a rerun was queued (the flag file exists).
-func (r *RerunFlag) Pending() bool {
-	return r.latch.Raised()
-}
-
-// Clear removes the flag. Call it before each run so only triggers arriving
-// during that run queue the next rerun (clearing before, not after, prevents
-// lost wakeups). Best-effort: a missing flag is already the desired state.
-func (r *RerunFlag) Clear() {
-	r.latch.Clear()
 }
