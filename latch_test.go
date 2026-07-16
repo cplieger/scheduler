@@ -3,6 +3,7 @@ package scheduler
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -38,6 +39,49 @@ func TestLatch(t *testing.T) {
 	l.Clear()
 	if l.Raised() {
 		t.Error("latch must remain un-raised after a second Clear()")
+	}
+}
+
+// TestLatchRaiseSurvivesConcurrentClear hammers Raise against a concurrent
+// Clear: the raiser's open can attach to a pre-existing inode that the Clear
+// then unlinks, which used to lose the signal silently. Raise's verify-retry
+// makes the postcondition structural — the exact interleaving cannot be forced
+// deterministically from outside, so this exercises the window many times
+// (and, under -race, the accesses) and asserts Raise never errors. The
+// sequential re-raise at the end pins that a raise with no subsequent Clear
+// is always observable.
+func TestLatchRaiseSurvivesConcurrentClear(t *testing.T) {
+	t.Parallel()
+	l := NewLatch(filepath.Join(t.TempDir(), ".latch"))
+
+	for range 300 {
+		if err := l.Raise(); err != nil {
+			t.Fatalf("setup Raise() returned error: %v", err)
+		}
+		start := make(chan struct{})
+		done := make(chan error, 1)
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			<-start
+			done <- l.Raise()
+		})
+		wg.Go(func() {
+			<-start
+			l.Clear()
+		})
+		close(start)
+		wg.Wait()
+		if err := <-done; err != nil {
+			t.Fatalf("concurrent Raise() returned error: %v", err)
+		}
+		l.Clear()
+	}
+
+	if err := l.Raise(); err != nil {
+		t.Fatalf("final Raise() returned error: %v", err)
+	}
+	if !l.Raised() {
+		t.Error("a raise with no subsequent Clear must be observable")
 	}
 }
 
