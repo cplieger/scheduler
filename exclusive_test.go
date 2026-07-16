@@ -201,6 +201,9 @@ func TestExclusiveConsumeLoop(t *testing.T) {
 		t.Errorf("job ran %d times, want 2 (initial + one queued rerun)", runs)
 	}
 	assertLogged(t, buf, "running queued cycle request")
+	if !strings.Contains(buf.String(), "attempt=1") {
+		t.Errorf("log = %q, want rerun attribution attempt=1", buf.String())
+	}
 	if pending, perr := e.Pending(); perr != nil || pending != 0 {
 		t.Errorf("Pending after drain = (%d, %v), want (0, nil)", pending, perr)
 	}
@@ -346,6 +349,161 @@ func TestExclusiveRunOrSkipDrainsQueue(t *testing.T) {
 	assertLogged(t, buf, "running queued cycle request")
 }
 
+func TestExclusiveGateClosedSkipsRun(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	logger, buf := captureLogger()
+	// Seed a queued request: the gated call must not consume it (the run it
+	// is owed never starts) and must not clear it as stale.
+	if err := os.WriteFile(filepath.Join(dir, ExclusiveQueueName), []byte("1\n"), 0o644); err != nil {
+		t.Fatalf("seeding queue counter: %v", err)
+	}
+	e := NewExclusive(dir, logger, WithGate(func() bool { return false }))
+
+	out, err := e.Run(failIfRun(t))
+	if err != nil {
+		t.Fatalf("gated Run err = %v, want nil", err)
+	}
+	if out != OutcomeGated {
+		t.Errorf("gated Run outcome = %s, want gated", out)
+	}
+	assertLogged(t, buf, "cycle gate closed; skipping run")
+	assertNotLogged(t, buf, "stale queued-run marker cleared at startup")
+	if pending, perr := e.Pending(); perr != nil || pending != 1 {
+		t.Errorf("Pending after gated run = (%d, %v), want (1, nil)", pending, perr)
+	}
+
+	// RunOrSkip honours the gate identically, and the lock is released (a
+	// follow-up ungated runner acquires it and clears the seeded demand).
+	if out, serr := e.RunOrSkip(failIfRun(t)); serr != nil || out != OutcomeGated {
+		t.Errorf("gated RunOrSkip = (%s, %v), want (gated, nil)", out, serr)
+	}
+	open := NewExclusive(dir, silentLogger())
+	runs := 0
+	if out, rerr := open.Run(func() error { runs++; return nil }); rerr != nil || out != OutcomeRan || runs != 1 {
+		t.Errorf("ungated Run after gated calls = (%s, %v) with %d runs, want (ran, nil) with 1", out, rerr, runs)
+	}
+}
+
+func TestExclusiveGateClosureDefersQueuedDemand(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	logger, buf := captureLogger()
+	var gateOpen atomic.Bool
+	gateOpen.Store(true)
+	e := NewExclusive(dir, logger, WithGate(gateOpen.Load))
+	requester := NewExclusive(dir, silentLogger())
+
+	runs := 0
+	out, err := e.Run(func() error {
+		runs++
+		if qOut, qErr := requester.Run(failIfRun(t)); qErr != nil || qOut != OutcomeQueued {
+			t.Errorf("mid-run Run = (%s, %v), want (queued, nil)", qOut, qErr)
+		}
+		gateOpen.Store(false) // shutdown lands during the pass
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+	if out != OutcomeRan {
+		t.Errorf("Run outcome = %s, want ran (the queued rerun must not execute)", out)
+	}
+	if runs != 1 {
+		t.Errorf("job ran %d times, want 1 (gate closed before the rerun)", runs)
+	}
+	assertLogged(t, buf, "cycle gate closed; deferring queued demand")
+	if pending, perr := e.Pending(); perr != nil || pending != 1 {
+		t.Errorf("Pending = (%d, %v), want (1, nil) (deferred demand must survive)", pending, perr)
+	}
+}
+
+func TestExclusiveStopOnErrorDefersQueuedDemand(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	logger, buf := captureLogger()
+	e := NewExclusive(dir, logger, WithStopOnError())
+	requester := NewExclusive(dir, silentLogger())
+
+	jobErr := errors.New("cycle failed")
+	runs := 0
+	out, err := e.Run(func() error {
+		runs++
+		if qOut, qErr := requester.Run(failIfRun(t)); qErr != nil || qOut != OutcomeQueued {
+			t.Errorf("mid-run Run = (%s, %v), want (queued, nil)", qOut, qErr)
+		}
+		return jobErr
+	})
+	if !errors.Is(err, jobErr) {
+		t.Errorf("Run err = %v, want the job's own error", err)
+	}
+	if out != OutcomeRan {
+		t.Errorf("Run outcome = %s, want ran (the job ran once and failed)", out)
+	}
+	if runs != 1 {
+		t.Errorf("job ran %d times, want 1 (stop-on-error must not rerun)", runs)
+	}
+	assertLogged(t, buf, "cycle failed; deferring queued demand")
+	if pending, perr := e.Pending(); perr != nil || pending != 1 {
+		t.Errorf("Pending = (%d, %v), want (1, nil) (deferred demand must survive)", pending, perr)
+	}
+
+	// Without the option, the same shape keeps the default consume-through
+	// contract (covered in depth by TestExclusiveJobErrorsJoinedAcrossReruns).
+}
+
+func TestExclusiveRerunCapDefersDemand(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	logger, buf := captureLogger()
+	e := NewExclusive(dir, logger)
+	requester := NewExclusive(dir, logger)
+
+	// The job re-queues demand on every run (a relentless trigger source):
+	// without the cap the holder would rerun forever. It must execute the
+	// initial run plus exactly maxCoalescedReruns reruns, then retire with the
+	// residual request deferred in the counter file.
+	runs := 0
+	out, err := e.Run(func() error {
+		runs++
+		if runs <= 1+maxCoalescedReruns {
+			if qOut, qErr := requester.Run(failIfRun(t)); qErr != nil || qOut != OutcomeQueued {
+				t.Errorf("mid-run request at run %d = (%s, %v), want (queued, nil)", runs, qOut, qErr)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+	if out != OutcomeRanQueued {
+		t.Errorf("Run outcome = %s, want ran-queued", out)
+	}
+	if want := 1 + maxCoalescedReruns; runs != want {
+		t.Errorf("job ran %d times, want %d (initial + capped reruns)", runs, want)
+	}
+	assertLogged(t, buf, "rerun cap reached; deferring queued demand")
+	if pending, perr := e.Pending(); perr != nil || pending != 1 {
+		t.Errorf("Pending after cap = (%d, %v), want (1, nil) (deferred demand must survive)", pending, perr)
+	}
+
+	// The deferred demand is satisfied by the next acquisition: it clears the
+	// counter (the run about to start covers it) and runs exactly once.
+	buf.Reset()
+	postRuns := 0
+	out, err = e.Run(func() error { postRuns++; return nil })
+	if err != nil {
+		t.Fatalf("post-cap Run err = %v, want nil", err)
+	}
+	if out != OutcomeRan || postRuns != 1 {
+		t.Errorf("post-cap Run = (%s, %d runs), want (ran, 1)", out, postRuns)
+	}
+	assertLogged(t, buf, "stale queued-run marker cleared at startup")
+	if pending, perr := e.Pending(); perr != nil || pending != 0 {
+		t.Errorf("Pending after post-cap run = (%d, %v), want (0, nil)", pending, perr)
+	}
+}
+
 func TestExclusiveGarbageCounterParsesAsZero(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -469,11 +627,16 @@ func TestExclusiveNoOverlapHammer(t *testing.T) {
 	if got := executions.Load(); got < 1 {
 		t.Errorf("executions = %d, want at least 1", got)
 	}
-	// The post-release re-check guarantees no queued demand survives once
-	// every requester has returned: each queued unit is consumed by a rerun.
+	// Queued demand is consumed by reruns and handoffs up to each holder's
+	// rerun cap; a holder retiring at the cap may defer residue, which the
+	// next acquisition clears (the run that starts then satisfies it). One
+	// final run therefore leaves the counter at zero.
 	e := NewExclusive(dir, silentLogger())
+	if _, err := e.Run(func() error { return nil }); err != nil {
+		t.Fatalf("final drain Run err = %v, want nil", err)
+	}
 	if pending, err := e.Pending(); err != nil || pending != 0 {
-		t.Errorf("Pending after hammer = (%d, %v), want (0, nil)", pending, err)
+		t.Errorf("Pending after drain = (%d, %v), want (0, nil)", pending, err)
 	}
 }
 
@@ -555,6 +718,7 @@ func TestOutcomeString(t *testing.T) {
 		OutcomeQueued:    "queued",
 		OutcomeDiscarded: "discarded",
 		OutcomeSkipped:   "skipped",
+		OutcomeGated:     "gated",
 		Outcome(99):      "unknown",
 	}
 	for outcome, want := range cases {
