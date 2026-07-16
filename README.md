@@ -194,7 +194,7 @@ The storage under the queue counter is exported as `SlotFile`: a single-slot
 byte payload shared across processes through one file, mutated by atomic
 read-modify-write transactions under a short exclusive `flock` on the file
 itself. Build on it when your coalescing state needs a payload the counter
-cannot carry — docker-renovate-scheduler records *which repos* a queued
+cannot carry — docker-renovate-scheduler records _which repos_ a queued
 trigger wants, so a full-fleet request queued behind a scoped run reruns
 unscoped. The bytes' meaning, how concurrent demands merge, and when recorded
 demand counts as served are deliberately the caller's parser and policy;
