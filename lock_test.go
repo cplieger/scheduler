@@ -53,42 +53,6 @@ func TestTryLockOpenError(t *testing.T) {
 	}
 }
 
-func TestInFlight(t *testing.T) {
-	t.Parallel()
-	path := lockPath(t)
-
-	inFlight, err := InFlight(path)
-	if err != nil {
-		t.Fatalf("InFlight(free) err = %v, want nil", err)
-	}
-	if inFlight {
-		t.Error("InFlight(free) = true, want false")
-	}
-
-	lock, ok, err := TryLock(path)
-	if err != nil || !ok {
-		t.Fatalf("TryLock = (ok=%v, err=%v), want (true, nil)", ok, err)
-	}
-
-	inFlight, err = InFlight(path)
-	if err != nil {
-		t.Fatalf("InFlight(held) err = %v, want nil", err)
-	}
-	if !inFlight {
-		t.Error("InFlight(held) = false, want true")
-	}
-
-	lock.Unlock()
-
-	inFlight, err = InFlight(path)
-	if err != nil {
-		t.Fatalf("InFlight(released) err = %v, want nil", err)
-	}
-	if inFlight {
-		t.Error("InFlight(released) = true, want false")
-	}
-}
-
 func TestReadHolder(t *testing.T) {
 	t.Parallel()
 	path := lockPath(t)
@@ -144,16 +108,6 @@ func TestReadHolderUnreadablePath(t *testing.T) {
 	}
 	if !since.IsZero() {
 		t.Errorf("ReadHolder(directory) since = %s, want zero time", since)
-	}
-}
-
-func TestInFlightOpenError(t *testing.T) {
-	t.Parallel()
-	// A path whose parent does not exist cannot be opened, so InFlight must
-	// propagate the error rather than report the lock as free.
-	_, err := InFlight(filepath.Join(t.TempDir(), "missing-dir", ".lock"))
-	if err == nil {
-		t.Fatal("InFlight on an uncreatable path err = nil, want an error")
 	}
 }
 

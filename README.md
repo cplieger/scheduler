@@ -1,6 +1,6 @@
 # scheduler
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler.svg)](https://pkg.go.dev/github.com/cplieger/scheduler)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler/v3.svg)](https://pkg.go.dev/github.com/cplieger/scheduler/v3)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/scheduler)](https://github.com/cplieger/scheduler/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/coverage.json)](https://github.com/cplieger/scheduler/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/mutation.json)](https://github.com/cplieger/scheduler/issues?q=label%3Agremlins-tracker)
@@ -10,11 +10,11 @@
 
 A standalone Go library of small, composable primitives for a container that
 runs a job on an interval or an external trigger: interval parsing with the
-standard sentinels, a startup-plus-ticker run loop with jitter, an advisory
-`flock` overlap guard, a graceful shutdown drain, a SIGTERM-graceful
-subprocess runner, and — in the `trigger` subpackage — the single-owner
-trigger broker (bounded FIFO queue, owner-only unix-socket server, thin
-synchronous client) for daemons where PID 1 owns every run. Standard library
+standard sentinels, a startup-plus-ticker run loop with jitter that drains on
+shutdown, an advisory `flock` overlap guard, a SIGTERM-graceful subprocess
+runner, and — in the `trigger` subpackage — the single-owner trigger broker
+(bounded FIFO queue, owner-only unix-socket server, thin synchronous client,
+opt-in executor loop) for daemons where PID 1 owns every run. Standard library
 only (test dependency: `pgregory.net/rapid`). Unix-only (the overlap guard is
 `flock(2)`).
 
@@ -26,7 +26,7 @@ the app (health is the companion library for the marker pattern).
 ## Install
 
 ```sh
-go get github.com/cplieger/scheduler/v2@latest
+go get github.com/cplieger/scheduler/v3@latest
 ```
 
 ## Usage
@@ -44,7 +44,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/scheduler/v3"
 )
 
 const lockPath = "/tmp/.myjob.lock"
@@ -66,9 +66,10 @@ func main() {
 		})
 	case scheduler.ModeExternal:
 		// Idle: runs are triggered out-of-band (an Ofelia docker-exec of a
-		// one-shot subcommand). On shutdown, wait out an in-flight external run.
+		// one-shot subcommand); the lock below keeps them from overlapping. A
+		// daemon that must itself wait out or cancel externally triggered runs
+		// should own execution instead — see the trigger subpackage.
 		<-ctx.Done()
-		scheduler.WaitForDrain(context.Background(), lockPath, scheduler.DefaultDrainPoll, 10*time.Minute)
 	case scheduler.ModeOnce:
 		runPass(ctx) // run exactly once, then exit
 	}
@@ -119,17 +120,9 @@ it is useful diagnostics).
 ### Overlap guard and coalescing
 
 `TryLock` / `Unlock` serialize runs across both the in-process loop and an
-out-of-band `docker exec` trigger. `InFlight` probes whether a run holds the
-lock; `ReadHolder` reads how long it has held it (observability only). A
-trigger that arrives mid-run is not dropped: `Exclusive` (next section) queues
-it as a coalesced rerun.
-
-`Latch` is the bare single-bit cross-process marker (present on disk means
-raised). Use it for one-off signals between processes that cannot signal each
-other, such as a daemon raising a shutdown/drain latch on `SIGTERM` that a
-separate `docker exec` child observes with `Raised()` and drains on — and wire
-that latch into `Exclusive` through `WithGate` so queued reruns stop launching
-once shutdown is signalled.
+out-of-band `docker exec` trigger. `ReadHolder` reads how long the current
+holder has held the lock (observability only). A trigger that arrives mid-run
+is not dropped: `Exclusive` (next section) queues it as a coalesced rerun.
 
 ### Run coalescing across processes
 
@@ -181,8 +174,8 @@ queue counter survives; the next run satisfies it):
   owed a run, succeed or fail. `WithStopOnError()` opts into the opposite:
   after a failed run the holder retires (warning `cycle failed; deferring
   queued demand`) instead of hammering a failing job.
-- `WithGate(func() bool)` puts the composition root's shutdown signal (a
-  context, a drain latch) in front of every run start: a gated initial run
+- `WithGate(func() bool)` puts the composition root's shutdown signal
+  (typically the shutdown context's `Err`) in front of every run start: a gated initial run
   returns `OutcomeGated` (`cycle gate closed; skipping run`), and queued
   demand behind a closed gate defers (`cycle gate closed; deferring queued
   demand`) — an in-flight run is never interrupted, and a stop request is
@@ -221,18 +214,19 @@ daemon uses `struct{}`, which frames as `{}` on the wire.
 
 ```go
 // Daemon side: one queue, one executor goroutine, one socket server.
+// trigger.Execute owns the Start/Finish lifecycle, so the exactly-one-result
+// contract is structural: the callback just returns the outcome.
 queue := trigger.NewQueue[payload](16)
 go func() {
-	for job := range queue.Jobs() {
-		job.Start()
-		ok := runPass(job.Payload) // the app's real work
-		job.Finish(trigger.Outcome{OK: ok, Duration: elapsed})
-	}
+	trigger.Execute(ctx, queue, func(ctx context.Context, trig string, p payload) trigger.Outcome {
+		ok, elapsed := runPass(ctx, p) // the app's real work
+		return trigger.Outcome{OK: ok, Duration: elapsed}
+	})
 }()
 ln, err := trigger.Listen("/tmp/myapp.sock") // owner-only, stale file unlinked
 srv := &trigger.Server[payload]{Queue: queue}
 srv.Serve(ln)
-// shutdown: ln.Close(); queue.Close(); drain the executor; srv.Wait()
+// shutdown: ln.Close(); queue.Close(); Execute drains and returns; srv.Wait()
 
 // Trigger subcommand: submit one run, wait for its own result.
 final, err := trigger.Submit("/tmp/myapp.sock", payload{Repos: repos}, nil)
@@ -240,13 +234,19 @@ final, err := trigger.Submit("/tmp/myapp.sock", payload{Repos: repos}, nil)
 ```
 
 The queue rejects fast when full or closing (`ErrFull`, `ErrClosed` — their
-messages travel the wire as the rejection reason), an accepted job is
-guaranteed exactly one result (shutdown cancels queued jobs with an explicit
-reason instead of dropping them), and the server never logs payload contents
-(a forwarded environment can carry secrets; the `OnAccepted`/`OnRejected`
-hooks exist so the app logs acceptance in its own vocabulary). What a job
-does, how its outcome maps to health, and the exact wording of lifecycle log
-lines stay in the app — same mechanism-vs-policy split as `SlotFile`.
+messages travel the wire as the rejection reason), and an accepted job is
+guaranteed exactly one result: `Execute` finishes jobs received after
+shutdown with `CancelledReason` instead of dropping them, and delivers a
+panicking run's failure result before propagating the panic, so a waiting
+client is never stranded. A daemon whose executor policy diverges (running
+jobs outside the shutdown context, halting admission on an app state, its own
+cancellation vocabulary) writes the ~7-line loop by hand instead — `Execute`
+is opt-in mechanism, not required framework. The server never logs payload
+contents (a forwarded environment can carry secrets; the
+`OnAccepted`/`OnRejected` hooks exist so the app logs acceptance in its own
+vocabulary). What a job does, how its outcome maps to health, and the exact
+wording of lifecycle log lines stay in the app — same mechanism-vs-policy
+split as `SlotFile`.
 
 ## API
 
@@ -258,21 +258,19 @@ lines stay in the app — same mechanism-vs-policy split as `SlotFile`.
 - `LoopOptions` — `{Interval, Jitter, FireOnStart}`.
 - `RunLoop(ctx, job, opts)` — sequential startup-plus-ticker loop; drains on cancellation.
 - `JitteredDelay(interval, fraction) time.Duration` — the pure ±band jitter core.
-- `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`.
-- `InFlight(path) (bool, error)`, `ReadHolder(path) (time.Time, bool)`.
-- `Latch`, `NewLatch(path)`, `.Raise() error`, `.Raised() bool`, `.Clear()` — the bare single-bit cross-process marker, used for one-off signals such as a shutdown/drain latch.
+- `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`, `ReadHolder(path) (time.Time, bool)`.
 - `Exclusive`, `NewExclusive(dir, logger, opts...)`, `.Run(job) (Outcome, error)` (queue mode), `.RunOrSkip(job) (Outcome, error)` (skip mode), `.Pending() (int, error)` — cross-process run coalescing.
 - `WithQueueCapacity(n)`, `WithGate(func() bool)`, `WithStopOnError()` — Exclusive options: queue depth (default 1), a pre-run shutdown gate, and fail-fast rerun deferral.
 - `SlotFile`, `NewSlotFile(path)`, `.Mutate(fn func(before []byte) []byte) ([]byte, error)` — the flock'd single-slot read-modify-write transaction behind Exclusive's counter, exported for app-defined coalescing payloads.
 - `Outcome` — `OutcomeRan`, `OutcomeRanQueued`, `OutcomeQueued`, `OutcomeDiscarded`, `OutcomeSkipped`, `OutcomeGated`, `OutcomeNone` (implements `fmt.Stringer`).
 - `ExclusiveLockName`, `ExclusiveQueueName` — the file names Exclusive maintains inside its directory.
-- `WaitForDrain(ctx, path, poll, maxWait) bool`, `DefaultDrainPoll`.
 - `CommandRunner`, `NewCommandRunner(grace) CommandRunner`, `DefaultGrace`.
 
 Subpackage `trigger` (the single-owner broker):
 
 - `Queue[P]`, `NewQueue[P](capacity)`, `.Submit(*Job[P]) error`, `.Jobs() <-chan *Job[P]`, `.Close()` — the bounded FIFO; `ErrFull`, `ErrClosed`.
 - `Job[P]`, `NewJob[P](trigger, payload)`, `.Start()`, `.Started()`, `.Finish(Outcome)`, `.Result()`, `TriggerExternal` — one request and its exactly-one-result lifecycle.
+- `Execute[P](ctx, queue, run func(ctx, trigger, payload) Outcome)` — the opt-in executor loop that owns `Start`/`Finish` structurally; `CancelledReason` is the outcome reason for jobs cancelled by shutdown before starting.
 - `Outcome` — `{OK, Reason, Duration}`, a job's final result.
 - `Listen(path) (net.Listener, error)` — owner-only unix socket with stale-file hygiene.
 - `Server[P]` — `{Queue, OnAccepted, OnRejected}`, `.Serve(ln)`, `.Wait()`; streams `Event` lines per connection.

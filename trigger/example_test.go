@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cplieger/scheduler/v2/trigger"
+	"github.com/cplieger/scheduler/v3/trigger"
 )
 
 // payload is an app's request type: the arguments one triggered run carries.

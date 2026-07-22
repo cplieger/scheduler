@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/scheduler/v3"
 )
 
 func ExampleParseInterval() {

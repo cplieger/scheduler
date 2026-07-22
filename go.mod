@@ -1,4 +1,4 @@
-module github.com/cplieger/scheduler/v2
+module github.com/cplieger/scheduler/v3
 
 go 1.26.5
 
