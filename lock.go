@@ -55,32 +55,6 @@ func (l *Lock) Unlock() {
 	_ = l.f.Close()
 }
 
-// InFlight reports whether a run currently holds the lock at path. It probes
-// with a non-blocking acquire: a free lock is taken and immediately released
-// (not in flight); a held lock reports in flight. Because flock releases when
-// the holding process exits, a crashed run never reports as perpetually in
-// flight.
-//
-// The probe's momentary acquisition is visible to concurrent lockers: a
-// TryLock racing an InFlight probe can lose to it and observe busy while no
-// run is actually in flight. A pure observer (WaitForDrain, status reporting)
-// at worst re-polls one interval later; a trigger that RECORDS demand on a
-// busy result (queueing a rerun marker, say) should re-probe once after
-// recording — otherwise the recorded demand can sit unconsumed until the next
-// scheduled run — or use Exclusive, whose enqueue-then-re-probe closes that
-// window.
-func InFlight(path string) (inFlight bool, err error) {
-	l, ok, err := TryLock(path)
-	if err != nil {
-		return false, err
-	}
-	if ok {
-		l.Unlock()
-		return false, nil
-	}
-	return true, nil
-}
-
 // ReadHolder reads the acquisition timestamp the current holder recorded in the
 // lock file. known is false when the timestamp could not be read — the holder
 // had not written it yet, the line was torn mid-write, or the file is

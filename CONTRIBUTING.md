@@ -17,21 +17,25 @@ its own:
 - **`RunLoop` / `JitteredDelay`** — the built-in mode's startup-fire + jittered
   ticker; sequential, so runs never overlap in-process. `JitteredDelay` is the
   pure ±band core, split out so it can be property-tested directly.
-- **`TryLock` / `Unlock` / `InFlight` / `ReadHolder` / `RerunFlag`** — the
-  `flock(2)` overlap guard and its rerun-coalescing companion.
+- **`TryLock` / `Unlock` / `ReadHolder`** — the `flock(2)` overlap guard and
+  its holder-age probe.
 - **`Exclusive`** — cross-process run coalescing over the lock + a queue
   counter: `Run` (queue mode, demand-driven callers) and `RunOrSkip` (skip
   mode, loop ticks), with a bounded rerun queue (`WithQueueCapacity`).
-- **`WaitForDrain`** — the external-mode shutdown drain (poll the lock so a
-  daemon waits out a `docker exec` run it cannot `wait()` on).
+- **`SlotFile`** — the flock'd single-slot read-modify-write transaction
+  under `Exclusive`'s counter, exported for app-defined coalescing payloads.
 - **`NewCommandRunner`** — context-cancellable subprocesses that get SIGTERM
   (not SIGKILL) plus a grace period.
+- **The `trigger` subpackage** — the single-owner broker for daemons where
+  PID 1 owns every run: bounded FIFO `Queue`, owner-only unix-socket
+  `Server`, synchronous `Submit` client, and the opt-in `Execute` loop that
+  owns the `Start`/`Finish` lifecycle.
 
 The three scheduling modes a consumer selects on `Schedule.Mode`:
 
 - `ModeBuiltin` → `RunLoop` (a positive interval).
-- `ModeExternal` → idle on `ctx.Done`, runs triggered out-of-band; drain with
-  `WaitForDrain` on shutdown.
+- `ModeExternal` → idle on `ctx.Done`, runs triggered out-of-band (guarded by
+  `TryLock`, or owned outright via the `trigger` subpackage).
 - `ModeOnce` → call the job directly, then exit.
 
 ## Unsupported by design — a binding contract
@@ -56,18 +60,25 @@ The whole surface is small; keep it that way.
 
 - `Mode` (`ModeBuiltin`/`ModeExternal`/`ModeOnce`), `Schedule`, `ParseInterval`,
   and the interval options `WithZeroAsOnce` / `WithBounds` / `WithName` /
-  `WithIntervalLogger`.
+  `WithIntervalLogger` / `WithRedactedValue`.
 - `Job`, `LoopOptions`, `RunLoop`, `JitteredDelay`.
-- `Lock`, `TryLock`, `(*Lock).Unlock`, `InFlight`, `ReadHolder`.
-- `RerunFlag`, `NewRerunFlag`, `.Set` / `.Pending` / `.Clear`.
+- `Lock`, `TryLock`, `(*Lock).Unlock`, `ReadHolder`.
 - `Exclusive`, `NewExclusive`, `.Run` / `.RunOrSkip` / `.Pending`, the
-  `WithQueueCapacity` option, `Outcome`, and the `ExclusiveLockName` /
-  `ExclusiveQueueName` file-name constants. Its five log messages
-  (queued / discarding / skipping tick / running queued / stale marker
-  cleared) are a pinned contract — tests assert the exact text, and consumers
-  alert on them in Loki; changing one is a breaking change.
-- `WaitForDrain`, `DefaultDrainPoll`.
+  `WithQueueCapacity` / `WithGate` / `WithStopOnError` options, `Outcome`,
+  and the `ExclusiveLockName` / `ExclusiveQueueName` file-name constants. Its
+  coalescing log messages are a pinned contract — tests assert the exact
+  text, and consumers alert on them in Loki; changing one is a breaking
+  change.
+- `SlotFile`, `NewSlotFile`, `.Mutate`.
 - `CommandRunner`, `NewCommandRunner`, `DefaultGrace`.
+- Subpackage `trigger`: `Queue[P]` / `NewQueue` / `.Submit` / `.Jobs` /
+  `.Close` (`ErrFull`, `ErrClosed`), `Job[P]` / `NewJob` / `.Start` /
+  `.Started` / `.Finish` / `.Result`, `Outcome`, `TriggerExternal`,
+  `Execute` / `CancelledReason`, `Listen`, `Server[P]` / `.Serve` / `.Wait`,
+  `Event` (`EventQueued` / `EventStarted` / `EventDone`), `Submit`
+  (`ErrUnreachable`, `ErrSend`, `ErrConnectionLost`), `DialTimeout`. The
+  rejection errors and `CancelledReason` travel the wire verbatim, so their
+  text is part of the trigger contract.
 
 `ParseInterval` logs its fallback warnings through `slog.Default()` unless
 `WithIntervalLogger` is passed; there is no package-level logger and no
@@ -131,15 +142,17 @@ cases:
   `Mode.String`; `interval_fuzz_test.go` — `FuzzParseInterval`.
 - `loop_test.go` — `RunLoop` fire-on-start / repeated ticks / drain / guards,
   and the `rapid` property that `JitteredDelay` stays within its ±band.
-- `lock_test.go` — mutual exclusion, `InFlight`, `ReadHolder`, `RerunFlag`.
+- `lock_test.go` — mutual exclusion and `ReadHolder`.
 - `exclusive_test.go` — `Exclusive` queue/skip modes: acquire, queue, discard,
   capacity bounds, consume loop, stale-marker clear, error joining, the
   pinned log contract, a no-overlap hammer, and the crash-release proof (a
   re-exec'd child holding the lock is SIGKILLed and the flock must die with
   it).
-- `drain_test.go` — `WaitForDrain` not-in-flight / drained / timeout / cancel.
 - `command_test.go` — runner construction, default grace, and the SIGTERM-on-cancel
   proof (a child that traps TERM and exits 42).
+- `trigger/*_test.go` — the broker: queue admission and FIFO order, the
+  `Execute` lifecycle guarantees (exactly one result, cancel-before-start,
+  panic delivery), socket hygiene, wire protocol, and client error mapping.
 - `example_test.go` — runnable `Example` functions that double as docs; keep
   their `// Output:` blocks correct. `bench_test.go` — allocation/throughput
   benchmarks. `helpers_test.go` — shared test helpers.

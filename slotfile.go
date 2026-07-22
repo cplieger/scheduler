@@ -32,7 +32,7 @@ const slotFileMaxBytes = 1 << 16
 // concurrent opener land on a different inode and breaks mutual exclusion.
 // "Clear" is writing an empty payload. Place the path in a directory not
 // writable by untrusted local users, per the same symlink-following caveat as
-// TryLock and Latch.
+// TryLock.
 type SlotFile struct {
 	path string
 }

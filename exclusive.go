@@ -114,7 +114,7 @@ func WithQueueCapacity(n int) ExclusiveOption {
 // post-release handoff. A false return stops runs from starting — an initial
 // run is skipped (OutcomeGated) and queued demand is deferred to the next run
 // — while the in-flight run is never interrupted. Wire it to the composition
-// root's shutdown signal (a context's Err, a cross-process drain latch) so a
+// root's shutdown signal (typically the shutdown context's Err) so a
 // stop request is never followed by a fresh run. Requests are still recorded
 // while the gate is closed: the gate decides what runs, not what queues.
 func WithGate(gate func() bool) ExclusiveOption {
@@ -157,7 +157,7 @@ func WithStopOnError() ExclusiveOption {
 // deleted (clearing the queue writes a zero count — unlinking a locked file
 // would let a concurrent opener land on a different inode and break mutual
 // exclusion). Place dir where untrusted local users cannot write, per the
-// same symlink-following caveat as TryLock and Latch.
+// same symlink-following caveat as TryLock.
 type Exclusive struct {
 	logger      *slog.Logger
 	gate        func() bool
