@@ -11,9 +11,12 @@
 A standalone Go library of small, composable primitives for a container that
 runs a job on an interval or an external trigger: interval parsing with the
 standard sentinels, a startup-plus-ticker run loop with jitter, an advisory
-`flock` overlap guard, a graceful shutdown drain, and a SIGTERM-graceful
-subprocess runner. Standard library only (test dependency:
-`pgregory.net/rapid`). Unix-only (the overlap guard is `flock(2)`).
+`flock` overlap guard, a graceful shutdown drain, a SIGTERM-graceful
+subprocess runner, and — in the `trigger` subpackage — the single-owner
+trigger broker (bounded FIFO queue, owner-only unix-socket server, thin
+synchronous client) for daemons where PID 1 owns every run. Standard library
+only (test dependency: `pgregory.net/rapid`). Unix-only (the overlap guard is
+`flock(2)`).
 
 It is a toolbox, not a framework: each primitive is independent, and the
 composition root wires the ones it needs. The library says nothing about what a
@@ -194,12 +197,56 @@ The storage under the queue counter is exported as `SlotFile`: a single-slot
 byte payload shared across processes through one file, mutated by atomic
 read-modify-write transactions under a short exclusive `flock` on the file
 itself. Build on it when your coalescing state needs a payload the counter
-cannot carry — docker-renovate-scheduler records _which repos_ a queued
-trigger wants, so a full-fleet request queued behind a scoped run reruns
-unscoped. The bytes' meaning, how concurrent demands merge, and when recorded
-demand counts as served are deliberately the caller's parser and policy;
-`SlotFile` owns only the transaction (create-on-first-use, blocking lock,
-skip-if-unchanged write, never unlink a live slot).
+cannot carry. The bytes' meaning, how concurrent demands merge, and when
+recorded demand counts as served are deliberately the caller's parser and
+policy; `SlotFile` owns only the transaction (create-on-first-use, blocking
+lock, skip-if-unchanged write, never unlink a live slot).
+
+### Single-owner trigger broker (`trigger` subpackage)
+
+Where `Exclusive` coordinates runs across processes, the `trigger` subpackage
+is the in-process alternative for daemons that own execution outright: PID 1
+executes every run as its own child, and triggers — the built-in ticker, each
+`docker exec`'d subcommand — only submit requests. One bounded FIFO
+`trigger.Queue` feeds one executor goroutine (mutual exclusion is that loop),
+a `trigger.Server` accepts requests on an owner-only in-container unix socket
+and streams `queued`/`started`/`done` events back, and `trigger.Submit` is
+the thin synchronous client a trigger subcommand wraps. No coalescing: every
+accepted request gets its own run, its own arguments, and its own true result,
+in arrival order.
+
+The request payload is a type parameter: a daemon whose runs take arguments
+declares a struct (repo slugs plus a forwarded environment, say); an argless
+daemon uses `struct{}`, which frames as `{}` on the wire.
+
+```go
+// Daemon side: one queue, one executor goroutine, one socket server.
+queue := trigger.NewQueue[payload](16)
+go func() {
+	for job := range queue.Jobs() {
+		job.Start()
+		ok := runPass(job.Payload) // the app's real work
+		job.Finish(trigger.Outcome{OK: ok, Duration: elapsed})
+	}
+}()
+ln, err := trigger.Listen("/tmp/myapp.sock") // owner-only, stale file unlinked
+srv := &trigger.Server[payload]{Queue: queue}
+srv.Serve(ln)
+// shutdown: ln.Close(); queue.Close(); drain the executor; srv.Wait()
+
+// Trigger subcommand: submit one run, wait for its own result.
+final, err := trigger.Submit("/tmp/myapp.sock", payload{Repos: repos}, nil)
+// map final.OK / errors.Is(err, trigger.ErrUnreachable) to the exit code
+```
+
+The queue rejects fast when full or closing (`ErrFull`, `ErrClosed` — their
+messages travel the wire as the rejection reason), an accepted job is
+guaranteed exactly one result (shutdown cancels queued jobs with an explicit
+reason instead of dropping them), and the server never logs payload contents
+(a forwarded environment can carry secrets; the `OnAccepted`/`OnRejected`
+hooks exist so the app logs acceptance in its own vocabulary). What a job
+does, how its outcome maps to health, and the exact wording of lifecycle log
+lines stay in the app — same mechanism-vs-policy split as `SlotFile`.
 
 ## API
 
@@ -221,6 +268,16 @@ skip-if-unchanged write, never unlink a live slot).
 - `ExclusiveLockName`, `ExclusiveQueueName` — the file names Exclusive maintains inside its directory.
 - `WaitForDrain(ctx, path, poll, maxWait) bool`, `DefaultDrainPoll`.
 - `CommandRunner`, `NewCommandRunner(grace) CommandRunner`, `DefaultGrace`.
+
+Subpackage `trigger` (the single-owner broker):
+
+- `Queue[P]`, `NewQueue[P](capacity)`, `.Submit(*Job[P]) error`, `.Jobs() <-chan *Job[P]`, `.Close()` — the bounded FIFO; `ErrFull`, `ErrClosed`.
+- `Job[P]`, `NewJob[P](trigger, payload)`, `.Start()`, `.Started()`, `.Finish(Outcome)`, `.Result()`, `TriggerExternal` — one request and its exactly-one-result lifecycle.
+- `Outcome` — `{OK, Reason, Duration}`, a job's final result.
+- `Listen(path) (net.Listener, error)` — owner-only unix socket with stale-file hygiene.
+- `Server[P]` — `{Queue, OnAccepted, OnRejected}`, `.Serve(ln)`, `.Wait()`; streams `Event` lines per connection.
+- `Event` — `{Kind, Reason, DurationMs, OK}`; kinds `EventQueued`, `EventStarted`, `EventDone`.
+- `Submit[P](socketPath, payload, onEvent) (Event, error)` — the synchronous client; `ErrUnreachable`, `ErrSend`, `ErrConnectionLost`; `DialTimeout`.
 
 ## Unsupported by design
 
