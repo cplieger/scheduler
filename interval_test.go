@@ -226,3 +226,29 @@ func TestParseIntervalBoundsSwapped(t *testing.T) {
 			"(swapped bounds must normalize to [1m,1h])", "30m", got.Interval, 30*time.Minute)
 	}
 }
+
+// TestParseIntervalNonPositiveDefPanics pins the def precondition: a
+// non-positive default is a programmer error in the composition root, caught
+// at first boot with a panic (the same contract as time.NewTicker), because
+// def backs the ModeBuiltin positive-interval invariant every consumer's
+// ticker relies on.
+func TestParseIntervalNonPositiveDefPanics(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		def  time.Duration
+	}{
+		{"zero def", 0},
+		{"negative def", -time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				if recover() == nil {
+					t.Errorf("ParseInterval(def=%s) did not panic, want panic on a non-positive default", tc.def)
+				}
+			}()
+			_ = ParseInterval("30m", tc.def, WithIntervalLogger(silentLogger()))
+		})
+	}
+}

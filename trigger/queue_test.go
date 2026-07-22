@@ -101,3 +101,16 @@ func TestJob_ExactlyOneResultNeverBlocksExecutor(t *testing.T) {
 		t.Errorf("Result() = %+v, want the finished outcome", out)
 	}
 }
+
+// TestQueue_NegativeCapacityPanics pins the constructor precondition: a
+// negative capacity is a programmer error surfaced as a clear panic at
+// construction rather than the runtime's opaque make(chan) panic.
+func TestQueue_NegativeCapacityPanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Error("NewQueue(-1) did not panic, want panic on a negative capacity")
+		}
+	}()
+	_ = NewQueue[struct{}](-1)
+}
