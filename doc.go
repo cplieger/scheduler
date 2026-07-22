@@ -35,6 +35,11 @@
 //   - NewCommandRunner builds context-cancellable subprocesses that shut down
 //     gracefully (SIGTERM with a grace period before SIGKILL).
 //
+// The trigger subpackage is the in-process alternative to the flock-based
+// coordination above, for single-owner daemons: PID 1 owns every run, and
+// triggers submit requests through a bounded FIFO queue served over an
+// owner-only in-container unix socket (see package trigger).
+//
 // The package is deliberately silent about what a job does, how health is
 // signaled, and how logging is configured; those belong to the consuming app
 // (see the companion health library for the marker pattern). It carries no
