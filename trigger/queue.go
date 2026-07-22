@@ -107,8 +107,14 @@ type Queue[P any] struct {
 // NewQueue builds a queue holding at most capacity pending jobs. Size it for
 // the realistic trigger set (a periodic job plus a trigger burst), not for
 // storage: a client hitting a full queue is rejected immediately with a clear
-// reason rather than queued unboundedly.
+// reason rather than queued unboundedly. capacity must be non-negative and
+// NewQueue panics otherwise (a programmer error, caught at first boot, with a
+// clearer message than the runtime's make(chan) panic it would otherwise
+// surface as).
 func NewQueue[P any](capacity int) *Queue[P] {
+	if capacity < 0 {
+		panic("trigger: NewQueue capacity must be non-negative")
+	}
 	return &Queue[P]{jobs: make(chan *Job[P], capacity)}
 }
 
