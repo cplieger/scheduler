@@ -4,6 +4,7 @@
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/scheduler)](https://github.com/cplieger/scheduler/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/coverage.json)](https://github.com/cplieger/scheduler/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/mutation.json)](https://github.com/cplieger/scheduler/issues?q=label%3Agremlins-tracker)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13868/badge)](https://www.bestpractices.dev/projects/13868)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/scheduler/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/scheduler)
 
 > Scheduling scaffold for containerized job runners
