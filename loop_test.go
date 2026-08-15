@@ -11,7 +11,7 @@ import (
 
 func TestRunLoopFiresOnStart(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var fires atomic.Int32
@@ -29,7 +29,7 @@ func TestRunLoopFiresOnStart(t *testing.T) {
 
 func TestRunLoopTicksRepeatedly(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var fires atomic.Int32
@@ -55,7 +55,7 @@ func TestRunLoopTicksRepeatedly(t *testing.T) {
 func TestRunLoopReturnsOnNonPositiveInterval(t *testing.T) {
 	t.Parallel()
 	var fires atomic.Int32
-	RunLoop(context.Background(), func(context.Context) { fires.Add(1) },
+	RunLoop(t.Context(), func(context.Context) { fires.Add(1) },
 		LoopOptions{Interval: 0, FireOnStart: true})
 	if got := fires.Load(); got != 0 {
 		t.Errorf("fires = %d, want 0 (a non-positive interval must not loop)", got)
@@ -64,6 +64,8 @@ func TestRunLoopReturnsOnNonPositiveInterval(t *testing.T) {
 
 func TestRunLoopDoesNotFireWhenAlreadyCancelled(t *testing.T) {
 	t.Parallel()
+	// Deliberately pre-cancelled, not t.Context(): the cancelled context IS
+	// the fixture for this test.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -106,7 +108,7 @@ func TestJitteredDelayWithinBand(t *testing.T) {
 
 func TestRunLoopWithJitterTicks(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	var fires atomic.Int32
