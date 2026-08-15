@@ -10,7 +10,7 @@ import (
 
 func TestNewCommandRunnerConstruction(t *testing.T) {
 	t.Parallel()
-	cmd := NewCommandRunner(9*time.Second)(context.Background(), "echo", "hi", "there")
+	cmd := NewCommandRunner(9*time.Second)(t.Context(), "echo", "hi", "there")
 	if cmd.WaitDelay != 9*time.Second {
 		t.Errorf("WaitDelay = %s, want 9s", cmd.WaitDelay)
 	}
@@ -24,7 +24,7 @@ func TestNewCommandRunnerConstruction(t *testing.T) {
 
 func TestNewCommandRunnerDefaultGrace(t *testing.T) {
 	t.Parallel()
-	cmd := NewCommandRunner(0)(context.Background(), "echo")
+	cmd := NewCommandRunner(0)(t.Context(), "echo")
 	if cmd.WaitDelay != DefaultGrace {
 		t.Errorf("WaitDelay = %s, want DefaultGrace %s", cmd.WaitDelay, DefaultGrace)
 	}
@@ -32,14 +32,14 @@ func TestNewCommandRunnerDefaultGrace(t *testing.T) {
 
 func TestNewCommandRunnerRuns(t *testing.T) {
 	t.Parallel()
-	if err := NewCommandRunner(DefaultGrace)(context.Background(), "true").Run(); err != nil {
+	if err := NewCommandRunner(DefaultGrace)(t.Context(), "true").Run(); err != nil {
 		t.Errorf("running `true` = %v, want nil", err)
 	}
 }
 
 func TestNewCommandRunnerCancelSendsSIGTERM(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	// The child traps SIGTERM and exits 42; a default os/exec cancel would
 	// SIGKILL it (uncatchable, no exit 42), so observing 42 proves SIGTERM.
 	cmd := NewCommandRunner(2*time.Second)(ctx, "sh", "-c", "trap 'exit 42' TERM; sleep 30 & wait")
