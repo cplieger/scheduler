@@ -97,7 +97,8 @@ func (j *Job[P]) Result() <-chan Outcome {
 
 // Queue is the bounded FIFO between triggers and the executor. Submission is
 // non-blocking: a full or closed queue rejects immediately. The channel is
-// the queue; the executor is its only receiver.
+// the queue; the executor is its only receiver. The zero value is not usable;
+// construct with NewQueue.
 type Queue[P any] struct {
 	jobs   chan *Job[P]
 	mu     sync.Mutex

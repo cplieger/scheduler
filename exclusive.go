@@ -121,15 +121,6 @@ func WithGate(gate func() bool) ExclusiveOption {
 	return func(e *Exclusive) { e.gate = gate }
 }
 
-// WithStopOnError makes a failed job run stop the consume loop and any
-// further handoffs for that call: remaining queued demand is deferred to the
-// next run instead of being executed against a job that just failed ("don't
-// hammer a failing job"). The default keeps queue mode's demand-satisfaction
-// contract: every queued request is owed a run, succeed or fail.
-func WithStopOnError() ExclusiveOption {
-	return func(e *Exclusive) { e.stopOnError = true }
-}
-
 // Exclusive coordinates cycle runs across processes so that at most one runs
 // at a time, with a small queue of pending rerun requests instead of blocked
 // waiters — packaged cross-process run coalescing for callers that are
@@ -148,10 +139,10 @@ func WithStopOnError() ExclusiveOption {
 // A holder executes at most maxCoalescedReruns (8) queued reruns per
 // acquisition; demand still pending past that cap is deferred — it stays in
 // the counter file and the next acquisition's run satisfies it — so a
-// relentless trigger source cannot pin one holder indefinitely. Two options
-// bound the holder further: WithGate stops runs from starting once the
-// composition root's shutdown signal trips, and WithStopOnError stops rerun
-// consumption after a failed run. Deferral is always demand-preserving.
+// relentless trigger source cannot pin one holder indefinitely. WithGate
+// bounds the holder further: it stops runs from starting once the
+// composition root's shutdown signal trips. Deferral is always
+// demand-preserving.
 //
 // Both files live in dir and are created on first use; they are never
 // deleted (clearing the queue writes a zero count — unlinking a locked file
@@ -159,16 +150,15 @@ func WithStopOnError() ExclusiveOption {
 // exclusion). Place dir where untrusted local users cannot write, per the
 // same symlink-following caveat as TryLock.
 type Exclusive struct {
-	logger      *slog.Logger
-	gate        func() bool
-	dir         string
-	capacity    int
-	stopOnError bool
+	logger   *slog.Logger
+	gate     func() bool
+	dir      string
+	capacity int
 }
 
 // NewExclusive returns an Exclusive coordinating runs through lock and queue
 // files inside dir (which must exist). A nil log falls back to slog.Default()
-// at call time. Options: WithQueueCapacity, WithGate, WithStopOnError.
+// at call time. Options: WithQueueCapacity, WithGate.
 func NewExclusive(dir string, log *slog.Logger, opts ...ExclusiveOption) *Exclusive {
 	e := &Exclusive{dir: dir, logger: log, capacity: 1}
 	for _, opt := range opts {
@@ -180,6 +170,13 @@ func NewExclusive(dir string, log *slog.Logger, opts ...ExclusiveOption) *Exclus
 // gateOpen reports whether a run may start; a nil gate is always open.
 func (e *Exclusive) gateOpen() bool {
 	return e.gate == nil || e.gate()
+}
+
+// queueCapacity resolves the effective rerun-queue capacity at call time: the
+// configured value, or the single-slot default of 1 when unset, so a
+// zero-value Exclusive queues exactly like one from NewExclusive.
+func (e *Exclusive) queueCapacity() int {
+	return max(e.capacity, 1)
 }
 
 // log resolves the logger lazily so a nil-constructed Exclusive follows the
@@ -215,13 +212,12 @@ func (e *Exclusive) queuePath() string { return filepath.Join(e.dir, ExclusiveQu
 // outcomes are success for the requesting process: log-and-exit-0 is the
 // intended caller behavior.
 //
-// A failed run does not stop queued demand by default: each queued request is
-// owed a run that starts after it arrived, succeed or fail, so the consume
-// loop continues through job errors (bounded by the rerun cap). WithStopOnError
-// opts into the opposite policy — a failed run defers remaining demand to the
-// next run. WithGate stops runs from STARTING once the composition root's
-// shutdown (or other) signal trips: a gated initial run returns OutcomeGated,
-// and demand queued behind a closed gate waits for the next run.
+// A failed run does not stop queued demand: each queued request is owed a
+// run that starts after it arrived, succeed or fail, so the consume loop
+// continues through job errors (bounded by the rerun cap). WithGate stops
+// runs from STARTING once the composition root's shutdown (or other) signal
+// trips: a gated initial run returns OutcomeGated, and demand queued behind
+// a closed gate waits for the next run.
 func (e *Exclusive) Run(job func() error) (Outcome, error) {
 	lock, ok, err := TryLock(e.lockPath())
 	if err != nil {
@@ -232,7 +228,7 @@ func (e *Exclusive) Run(job func() error) (Outcome, error) {
 	}
 
 	before, err := e.mutateQueue(func(n int) int {
-		if n >= e.capacity {
+		if n >= e.queueCapacity() {
 			return n
 		}
 		return n + 1
@@ -240,9 +236,9 @@ func (e *Exclusive) Run(job func() error) (Outcome, error) {
 	if err != nil {
 		return OutcomeNone, err
 	}
-	if before >= e.capacity {
+	if before >= e.queueCapacity() {
 		e.log().Info("cycle lock busy; rerun already queued; discarding request",
-			"dir", e.dir, "pending", before, "capacity", e.capacity)
+			"dir", e.dir, "pending", before, "capacity", e.queueCapacity())
 		return OutcomeDiscarded, nil
 	}
 
@@ -257,7 +253,7 @@ func (e *Exclusive) Run(job func() error) (Outcome, error) {
 	}
 	if !ok {
 		e.log().Info("cycle lock busy; queued rerun request",
-			"dir", e.dir, "pending", before+1, "capacity", e.capacity)
+			"dir", e.dir, "pending", before+1, "capacity", e.queueCapacity())
 		return OutcomeQueued, nil
 	}
 	return e.runHolding(relock, acquireReprobe, job)
@@ -325,8 +321,7 @@ const (
 // — draws it down, and an exhausted budget retires the holder instead of
 // re-acquiring, deferring whatever demand remains to the next run. The gate
 // (WithGate) is consulted before the initial run and again before every
-// rerun/handoff; stop-on-error (WithStopOnError) retires the holder after a
-// failed run.
+// rerun/handoff.
 func (e *Exclusive) runHolding(lock *Lock, kind acquireKind, job func() error) (Outcome, error) {
 	if !e.gateOpen() {
 		lock.Unlock()
@@ -359,10 +354,9 @@ func (e *Exclusive) runHolding(lock *Lock, kind acquireKind, job func() error) (
 }
 
 // runState carries one Run/RunOrSkip call's holder-side accounting: the
-// remaining rerun budget and whether stop-on-error tripped.
+// remaining rerun budget.
 type runState struct {
-	budget  int
-	stopped bool
+	budget int
 }
 
 // attempt is the 1-based ordinal of the queued rerun that was just charged
@@ -373,19 +367,16 @@ func (st *runState) attempt() int { return maxCoalescedReruns - st.budget }
 // enqueued between the consume loop's last empty read and the Unlock would
 // otherwise sit until the next tick, so if demand is pending and the lock is
 // still free, the holder takes it back for a handoff stretch. A busy lock
-// means another runner owns the demand now. Three conditions retire the
+// means another runner owns the demand now. Two conditions retire the
 // holder instead, deferring the demand — it stays in the counter file and the
 // next run to take the lock satisfies it — each logged exactly once, here:
-// stop-on-error tripped, the gate closed, or the rerun budget ran out.
+// the gate closed, or the rerun budget ran out.
 func (e *Exclusive) reacquireForPending(st *runState) (relock *Lock, again bool, err error) {
 	pending, err := e.Pending()
 	if err != nil || pending == 0 {
 		return nil, false, err
 	}
 	switch {
-	case st.stopped:
-		e.log().Warn("cycle failed; deferring queued demand",
-			"dir", e.dir, "pending", pending)
 	case !e.gateOpen():
 		e.log().Info("cycle gate closed; deferring queued demand",
 			"dir", e.dir, "pending", pending)
@@ -430,9 +421,8 @@ func (e *Exclusive) consumeAtAcquisition(kind acquireKind) error {
 // and the consume loop. It does not release the lock. reran reports whether at
 // least one queued rerun was executed within this stretch. st carries the
 // holder-wide accounting: a handoff stretch's initial run and every
-// consume-loop rerun draw the budget down one each, a failing job under
-// stop-on-error trips st.stopped, and the consume loop stops without dequeuing
-// once the budget is spent, the gate closes, or the stop tripped (the demand
+// consume-loop rerun draw the budget down one each, and the consume loop stops
+// without dequeuing once the budget is spent or the gate closes (the demand
 // stays recorded for the next run; reacquireForPending logs the deferral).
 func (e *Exclusive) holdCycle(kind acquireKind, job func() error, st *runState) (reran bool, err error) {
 	var errs []error
@@ -444,9 +434,11 @@ func (e *Exclusive) holdCycle(kind acquireKind, job func() error, st *runState) 
 		e.log().Info("running queued cycle request", "dir", e.dir, "attempt", st.attempt())
 	}
 
-	errs = e.runJobOnce(job, st, errs)
+	if jobErr := job(); jobErr != nil {
+		errs = append(errs, jobErr)
+	}
 
-	for st.budget > 0 && !st.stopped && e.gateOpen() {
+	for st.budget > 0 && e.gateOpen() {
 		had, dqErr := e.dequeueOne()
 		if dqErr != nil {
 			errs = append(errs, dqErr)
@@ -458,21 +450,11 @@ func (e *Exclusive) holdCycle(kind acquireKind, job func() error, st *runState) 
 		reran = true
 		st.budget--
 		e.log().Info("running queued cycle request", "dir", e.dir, "attempt", st.attempt())
-		errs = e.runJobOnce(job, st, errs)
-	}
-	return reran, errors.Join(errs...)
-}
-
-// runJobOnce executes the job once, appending its error to errs and tripping
-// the stop-on-error state when that policy is configured.
-func (e *Exclusive) runJobOnce(job func() error, st *runState, errs []error) []error {
-	if jobErr := job(); jobErr != nil {
-		errs = append(errs, jobErr)
-		if e.stopOnError {
-			st.stopped = true
+		if jobErr := job(); jobErr != nil {
+			errs = append(errs, jobErr)
 		}
 	}
-	return errs
+	return reran, errors.Join(errs...)
 }
 
 // dequeueOne consumes one queued request, reporting whether one was pending.

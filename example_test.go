@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/scheduler/v4"
 )
 
 func ExampleParseInterval() {
@@ -15,7 +15,7 @@ func ExampleParseInterval() {
 	fmt.Printf("%s every %s\n", built.Mode, built.Interval)
 
 	fmt.Println(scheduler.ParseInterval("off", time.Hour).Mode)
-	fmt.Println(scheduler.ParseInterval("0", time.Hour, scheduler.WithZeroAsOnce()).Mode)
+	fmt.Println(scheduler.ParseInterval("0", time.Hour, scheduler.WithZeroAsOnce(true)).Mode)
 	// Output:
 	// built-in every 30m0s
 	// external

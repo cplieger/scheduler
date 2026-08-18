@@ -40,7 +40,7 @@ func TestParseInterval(t *testing.T) {
 			t.Parallel()
 			opts := []IntervalOption{WithIntervalLogger(silentLogger())}
 			if tc.zeroAsOnce {
-				opts = append(opts, WithZeroAsOnce())
+				opts = append(opts, WithZeroAsOnce(true))
 			}
 			got := ParseInterval(tc.raw, testDefault, opts...)
 			if got.Mode != tc.wantMode {
@@ -155,7 +155,7 @@ func TestParseIntervalRedactedValue(t *testing.T) {
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&buf, nil))
 			opts := append([]IntervalOption{
-				WithRedactedValue(), WithIntervalLogger(logger), WithName("TEST_INTERVAL"),
+				WithRedactedValue(true), WithIntervalLogger(logger), WithName("TEST_INTERVAL"),
 			}, tc.opts...)
 			got := ParseInterval(tc.raw, testDefault, opts...)
 			out := buf.String()
@@ -180,12 +180,51 @@ func TestParseIntervalRedactedClampKeepsBound(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	got := ParseInterval("1s", testDefault,
-		WithRedactedValue(), WithBounds(time.Minute, time.Hour), WithIntervalLogger(logger))
+		WithRedactedValue(true), WithBounds(time.Minute, time.Hour), WithIntervalLogger(logger))
 	if got.Interval != time.Minute {
 		t.Errorf("clamped Interval = %v, want %v (redaction must not change clamping)", got.Interval, time.Minute)
 	}
 	if !strings.Contains(buf.String(), "clamped_to=1m0s") {
 		t.Errorf("redacted clamp log = %q, want it to keep the applied bound clamped_to=1m0s", buf.String())
+	}
+}
+
+// TestIntervalOptionsAreLastWins pins the fleet option convention on the two
+// parameter-taking bool options: repeated applications resolve to the last
+// value, and an explicit false behaves exactly like leaving the option out.
+func TestIntervalOptionsAreLastWins(t *testing.T) {
+	t.Parallel()
+
+	if got := ParseInterval("0", testDefault, WithIntervalLogger(silentLogger()),
+		WithZeroAsOnce(false)); got.Mode != ModeExternal {
+		t.Errorf("WithZeroAsOnce(false) Mode = %s, want external (false must equal leaving the option out)", got.Mode)
+	}
+	if got := ParseInterval("0", testDefault, WithIntervalLogger(silentLogger()),
+		WithZeroAsOnce(true), WithZeroAsOnce(false)); got.Mode != ModeExternal {
+		t.Errorf("WithZeroAsOnce(true) then (false) Mode = %s, want external (the later false must win)", got.Mode)
+	}
+	if got := ParseInterval("0", testDefault, WithIntervalLogger(silentLogger()),
+		WithZeroAsOnce(false), WithZeroAsOnce(true)); got.Mode != ModeOnce {
+		t.Errorf("WithZeroAsOnce(false) then (true) Mode = %s, want once (the later true must win)", got.Mode)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	ParseInterval("banana", testDefault, WithIntervalLogger(logger), WithRedactedValue(false))
+	if !strings.Contains(buf.String(), "banana") {
+		t.Errorf("WithRedactedValue(false) log = %q, want the value echoed (false must equal leaving the option out)", buf.String())
+	}
+	buf.Reset()
+	ParseInterval("banana", testDefault, WithIntervalLogger(logger),
+		WithRedactedValue(true), WithRedactedValue(false))
+	if !strings.Contains(buf.String(), "banana") {
+		t.Errorf("WithRedactedValue(true) then (false) log = %q, want the value echoed (the later false must win)", buf.String())
+	}
+	buf.Reset()
+	ParseInterval("banana", testDefault, WithIntervalLogger(logger),
+		WithRedactedValue(false), WithRedactedValue(true))
+	if strings.Contains(buf.String(), "banana") {
+		t.Errorf("WithRedactedValue(false) then (true) log = %q, must not echo the value (the later true must win)", buf.String())
 	}
 }
 

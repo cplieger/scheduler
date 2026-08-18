@@ -18,11 +18,10 @@
 //     processes, a requester that finds a run in flight queues a rerun request
 //     (bounded, no blocked waiters) or skips its tick, and the runner executes
 //     the queued demand when the current run finishes — continuing through job
-//     errors by default (a queued request is owed a run, succeed or fail;
-//     WithStopOnError opts out) and retiring at a rerun cap that defers a
-//     storm's residue to the next run. WithGate wires the composition root's
-//     shutdown signal in front of every run start, so a stop request is never
-//     followed by a fresh run.
+//     errors (a queued request is owed a run, succeed or fail) and retiring
+//     at a rerun cap that defers a storm's residue to the next run. WithGate
+//     wires the composition root's shutdown signal in front of every run
+//     start, so a stop request is never followed by a fresh run.
 //   - SlotFile is the storage mechanism under Exclusive's counter — a
 //     single-slot byte payload mutated by flock'd read-modify-write
 //     transactions — exported for apps whose coalescing state carries a

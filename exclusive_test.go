@@ -283,6 +283,35 @@ func TestExclusiveCapacityBelowOneClampsToOne(t *testing.T) {
 	}
 }
 
+// TestExclusiveZeroValueQueuesLikeConstructed pins the zero-value contract on
+// the method path: an Exclusive whose capacity was never set (built as a
+// composite literal rather than through NewExclusive) queues exactly like
+// NewExclusive's single-slot default — one request queues, the next discards —
+// instead of silently discarding everything against a capacity of 0. Only
+// dir and logger are populated; they locate the files and silence the test,
+// while capacity stays the zero value under test.
+func TestExclusiveZeroValueQueuesLikeConstructed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	e := &Exclusive{dir: dir, logger: silentLogger()}
+
+	holder, ok, err := TryLock(filepath.Join(dir, ExclusiveLockName))
+	if err != nil || !ok {
+		t.Fatalf("seed TryLock = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+	defer holder.Unlock()
+
+	if out, rerr := e.Run(failIfRun(t)); rerr != nil || out != OutcomeQueued {
+		t.Errorf("first busy Run = (%s, %v), want (queued, nil) (zero capacity must default to 1)", out, rerr)
+	}
+	if out, rerr := e.Run(failIfRun(t)); rerr != nil || out != OutcomeDiscarded {
+		t.Errorf("second busy Run = (%s, %v), want (discarded, nil)", out, rerr)
+	}
+	if pending, perr := e.Pending(); perr != nil || pending != 1 {
+		t.Errorf("Pending = (%d, %v), want (1, nil)", pending, perr)
+	}
+}
+
 func TestExclusiveRunOrSkipBusy(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -416,40 +445,6 @@ func TestExclusiveGateClosureDefersQueuedDemand(t *testing.T) {
 	if pending, perr := e.Pending(); perr != nil || pending != 1 {
 		t.Errorf("Pending = (%d, %v), want (1, nil) (deferred demand must survive)", pending, perr)
 	}
-}
-
-func TestExclusiveStopOnErrorDefersQueuedDemand(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	logger, buf := captureLogger()
-	e := NewExclusive(dir, logger, WithStopOnError())
-	requester := NewExclusive(dir, silentLogger())
-
-	jobErr := errors.New("cycle failed")
-	runs := 0
-	out, err := e.Run(func() error {
-		runs++
-		if qOut, qErr := requester.Run(failIfRun(t)); qErr != nil || qOut != OutcomeQueued {
-			t.Errorf("mid-run Run = (%s, %v), want (queued, nil)", qOut, qErr)
-		}
-		return jobErr
-	})
-	if !errors.Is(err, jobErr) {
-		t.Errorf("Run err = %v, want the job's own error", err)
-	}
-	if out != OutcomeRan {
-		t.Errorf("Run outcome = %s, want ran (the job ran once and failed)", out)
-	}
-	if runs != 1 {
-		t.Errorf("job ran %d times, want 1 (stop-on-error must not rerun)", runs)
-	}
-	assertLogged(t, buf, "cycle failed; deferring queued demand")
-	if pending, perr := e.Pending(); perr != nil || pending != 1 {
-		t.Errorf("Pending = (%d, %v), want (1, nil) (deferred demand must survive)", pending, perr)
-	}
-
-	// Without the option, the same shape keeps the default consume-through
-	// contract (covered in depth by TestExclusiveJobErrorsJoinedAcrossReruns).
 }
 
 func TestExclusiveRerunCapDefersDemand(t *testing.T) {

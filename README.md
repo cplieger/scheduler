@@ -1,6 +1,6 @@
 # scheduler
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler/v3.svg)](https://pkg.go.dev/github.com/cplieger/scheduler/v3)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler/v4.svg)](https://pkg.go.dev/github.com/cplieger/scheduler/v4)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/scheduler)](https://github.com/cplieger/scheduler/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/coverage.json)](https://github.com/cplieger/scheduler/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/mutation.json)](https://github.com/cplieger/scheduler/issues?q=label%3Agremlins-tracker)
@@ -27,7 +27,7 @@ the app.
 ## Install
 
 ```sh
-go get github.com/cplieger/scheduler/v3@latest
+go get github.com/cplieger/scheduler/v4@latest
 ```
 
 ## Usage
@@ -45,7 +45,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/scheduler/v4"
 )
 
 const lockPath = "/tmp/.myjob.lock"
@@ -106,17 +106,19 @@ func runPass(ctx context.Context) {
 | `"30m"`, `"1h30m"` (positive Go duration) | `ModeBuiltin`, that cadence (clamped by `WithBounds`) |
 | `""` (unset) | `ModeBuiltin`, the default cadence |
 | `"off"`, `"disabled"` (case-insensitive) | `ModeExternal` |
-| `"0"`, `"0s"` (zero) | `ModeExternal`, or `ModeOnce` with `WithZeroAsOnce()` |
+| `"0"`, `"0s"` (zero) | `ModeExternal`, or `ModeOnce` with `WithZeroAsOnce(true)` |
 | `"-1h"` (negative) | `ModeBuiltin` at default + a warning (a likely typo) |
 | `"banana"` (unparseable) | `ModeBuiltin` at default + a warning |
 
-Options: `WithZeroAsOnce()` (treat a zero duration as run-once), `WithBounds(low, high)`
-(clamp a positive cadence), `WithName(env)` (name the variable in warnings),
-`WithIntervalLogger(l)` (route warnings to a specific logger; defaults to `slog.Default()`),
-and `WithRedactedValue()` (keep the supplied raw value out of every warning). Use
-`WithRedactedValue` when the interval passes through secret-capable config expansion,
-where a typo could place an expanded secret in the field; plain env-var reads should
-keep the default echo, which is useful diagnostics.
+Options: `WithZeroAsOnce(zeroAsOnce)` (true treats a zero duration as run-once; false
+keeps the default), `WithBounds(low, high)` (clamp a positive cadence), `WithName(env)`
+(name the variable in warnings), `WithIntervalLogger(l)` (route warnings to a specific
+logger; defaults to `slog.Default()`), and `WithRedactedValue(redacted)` (true keeps the
+supplied raw value out of every warning; false keeps the default echo). Repeated
+applications of a bool option resolve last-wins. Pass `WithRedactedValue(true)` when the
+interval passes through secret-capable config expansion, where a typo could place an
+expanded secret in the field; plain env-var reads should keep the default echo, which is
+useful diagnostics.
 
 ### Overlap guard and coalescing
 
@@ -171,10 +173,10 @@ acquisition. `Pending` reports the queued-request count for observability, and
 Three policy edges are deliberate, and all deferral is demand-preserving (the
 queue counter survives; the next run satisfies it):
 
-- A failed run does not stop queued demand by default: each queued request is
-  owed a run, succeed or fail. `WithStopOnError()` opts into the opposite:
-  after a failed run the holder retires (warning `cycle failed; deferring
-  queued demand`) instead of hammering a failing job.
+- A failed run does not stop queued demand: each queued request is owed a
+  run, succeed or fail, so the consume loop continues through job errors
+  (bounded by the rerun cap below) instead of dropping demand against a
+  failing job.
 - `WithGate(func() bool)` puts the composition root's shutdown signal
   (typically the shutdown context's `Err`) in front of every run start: a gated initial run
   returns `OutcomeGated` (`cycle gate closed; skipping run`), and queued
@@ -254,14 +256,14 @@ split as `SlotFile`.
 - `Mode`: `ModeBuiltin`, `ModeExternal`, `ModeOnce` (implements `fmt.Stringer`).
 - `Schedule`: `{Interval, Mode}` returned by `ParseInterval`.
 - `ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedule`.
-- `WithZeroAsOnce()`, `WithBounds(low, high)`, `WithName(name)`, `WithIntervalLogger(l)`, `WithRedactedValue()`: interval options.
+- `WithZeroAsOnce(zeroAsOnce bool)`, `WithBounds(low, high)`, `WithName(name)`, `WithIntervalLogger(l)`, `WithRedactedValue(redacted bool)`: interval options.
 - `Job`: `func(ctx context.Context)`, one unit of scheduled work.
 - `LoopOptions`: `{Interval, Jitter, FireOnStart}`.
 - `RunLoop(ctx, job, opts)`: sequential startup-plus-ticker loop; drains on cancellation.
 - `JitteredDelay(interval, fraction) time.Duration`: the pure ±band jitter core.
 - `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`, `ReadHolder(path) (time.Time, bool)`.
 - `Exclusive`, `NewExclusive(dir, logger, opts...)`, `.Run(job) (Outcome, error)` (queue mode), `.RunOrSkip(job) (Outcome, error)` (skip mode), `.Pending() (int, error)`: cross-process run coalescing.
-- `WithQueueCapacity(n)`, `WithGate(func() bool)`, `WithStopOnError()`: Exclusive options for queue depth (default 1), a pre-run shutdown gate, and fail-fast rerun deferral.
+- `WithQueueCapacity(n)`, `WithGate(func() bool)`: Exclusive options for queue depth (default 1) and a pre-run shutdown gate.
 - `SlotFile`, `NewSlotFile(path)`, `.Mutate(fn func(before []byte) []byte) ([]byte, error)`: the flock'd single-slot read-modify-write transaction behind Exclusive's counter, exported for app-defined coalescing payloads.
 - `Outcome`: `OutcomeRan`, `OutcomeRanQueued`, `OutcomeQueued`, `OutcomeDiscarded`, `OutcomeSkipped`, `OutcomeGated`, `OutcomeNone` (implements `fmt.Stringer`).
 - `ExclusiveLockName`, `ExclusiveQueueName`: the file names Exclusive maintains inside its directory.

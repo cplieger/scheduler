@@ -20,11 +20,8 @@ func FuzzParseInterval(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
 		for _, zeroAsOnce := range []bool{false, true} {
-			opts := []IntervalOption{WithIntervalLogger(silentLogger())}
-			if zeroAsOnce {
-				opts = append(opts, WithZeroAsOnce())
-			}
-			s := ParseInterval(raw, time.Hour, opts...)
+			s := ParseInterval(raw, time.Hour,
+				WithIntervalLogger(silentLogger()), WithZeroAsOnce(zeroAsOnce))
 			switch s.Mode {
 			case ModeBuiltin, ModeExternal, ModeOnce:
 			default:
