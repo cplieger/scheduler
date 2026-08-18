@@ -47,7 +47,7 @@ func testSocketPath(t *testing.T) string {
 // startExecutor drains q on a background goroutine, running fn per job (fn
 // owns Start/Finish). Returns a done channel that closes when the queue
 // drains.
-func startExecutor[P any](q *Queue[P], fn func(*Job[P])) <-chan struct{} {
+func startExecutor(q *Queue[testPayload], fn func(*Job[testPayload])) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

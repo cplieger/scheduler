@@ -19,11 +19,11 @@ const (
 	// ModeExternal idles: the built-in loop is disabled and runs are triggered
 	// out-of-band (for example an Ofelia docker-exec of a one-shot subcommand).
 	// It is selected by the "off" and "disabled" sentinels, and by a zero
-	// duration unless WithZeroAsOnce is set.
+	// duration unless WithZeroAsOnce(true) is passed.
 	ModeExternal
 	// ModeOnce runs the job exactly once, then exits. It is selected by a zero
-	// duration ("0"/"0s") only when WithZeroAsOnce is passed; otherwise a zero
-	// duration selects ModeExternal.
+	// duration ("0"/"0s") only when WithZeroAsOnce(true) is passed; otherwise a
+	// zero duration selects ModeExternal.
 	ModeOnce
 )
 
@@ -65,11 +65,13 @@ type intervalConfig struct {
 // IntervalOption configures ParseInterval.
 type IntervalOption func(*intervalConfig)
 
-// WithZeroAsOnce makes a zero duration ("0"/"0s") select ModeOnce instead of
-// the default ModeExternal. Use it for a job that supports a run-once mode (a
-// batch or one-shot context) in addition to a resident daemon.
-func WithZeroAsOnce() IntervalOption {
-	return func(c *intervalConfig) { c.zeroAsOnce = true }
+// WithZeroAsOnce selects what a zero duration ("0"/"0s") means: true makes it
+// select ModeOnce — for a job that supports a run-once mode (a batch or
+// one-shot context) in addition to a resident daemon — while false keeps the
+// default ModeExternal, exactly as if the option were absent. Repeated
+// applications resolve last-wins.
+func WithZeroAsOnce(zeroAsOnce bool) IntervalOption {
+	return func(c *intervalConfig) { c.zeroAsOnce = zeroAsOnce }
 }
 
 // WithBounds clamps a positive built-in interval to [low, high], logging a
@@ -94,17 +96,19 @@ func WithName(name string) IntervalOption {
 	return func(c *intervalConfig) { c.name = name }
 }
 
-// WithRedactedValue keeps the raw interval value out of ParseInterval's
-// warnings, making them field-name-only. Use it when the value passes through
+// WithRedactedValue selects whether ParseInterval's warnings echo the raw
+// interval value: true keeps it out, making them field-name-only, while false
+// keeps the default echo, exactly as if the option were absent. Repeated
+// applications resolve last-wins. Pass true when the value passes through
 // secret-capable config expansion (a YAML file with ${VAR} references): a
 // config typo can place an expanded secret in the interval field, and the
 // default unparseable-value warning would echo it to the startup log. Only the
 // unparseable warning can ever carry such a value — a negative or clamped
-// value necessarily parsed as a duration — but with this option every warning
+// value necessarily parsed as a duration — but with true every warning
 // omits the supplied value (the clamp warning keeps the resulting bound), so
 // the redaction contract is uniform rather than per-branch.
-func WithRedactedValue() IntervalOption {
-	return func(c *intervalConfig) { c.redactValue = true }
+func WithRedactedValue(redacted bool) IntervalOption {
+	return func(c *intervalConfig) { c.redactValue = redacted }
 }
 
 // WithIntervalLogger routes ParseInterval's warnings to a specific logger
@@ -120,7 +124,7 @@ func WithIntervalLogger(l *slog.Logger) IntervalOption {
 //   - empty              -> def, ModeBuiltin
 //   - "off" / "disabled" -> def, ModeExternal (case-insensitive)
 //   - a positive Go duration -> that duration (clamped by WithBounds), ModeBuiltin
-//   - a zero duration ("0"/"0s") -> def, ModeExternal (or ModeOnce with WithZeroAsOnce)
+//   - a zero duration ("0"/"0s") -> def, ModeExternal (or ModeOnce with WithZeroAsOnce(true))
 //   - a negative duration -> def, ModeBuiltin, with a warning (a likely typo;
 //     falling back to the default cadence beats silently disabling the job)
 //   - anything unparseable -> def, ModeBuiltin, with a warning
@@ -174,8 +178,8 @@ func ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedu
 }
 
 // warnFallback logs a fallback-to-default warning, echoing the supplied raw
-// value only when WithRedactedValue is not set (an expanded secret misplaced
-// in the interval field must never reach the log).
+// value unless WithRedactedValue(true) is in effect (an expanded secret
+// misplaced in the interval field must never reach the log).
 func (c *intervalConfig) warnFallback(msg, raw string, def time.Duration) {
 	if c.redactValue {
 		c.logger.Warn(msg, "name", c.name, "default", def.String())
@@ -185,10 +189,11 @@ func (c *intervalConfig) warnFallback(msg, raw string, def time.Duration) {
 }
 
 // clamp bounds a positive interval to the configured [low, high], logging when
-// it adjusts. A non-positive bound is treated as unset. Under WithRedactedValue
-// the warning omits the requested duration and keeps only the applied bound
-// (the requested value parsed as a duration so it cannot be a secret, but the
-// option's contract is that no supplied value is echoed).
+// it adjusts. A non-positive bound is treated as unset. Under
+// WithRedactedValue(true) the warning omits the requested duration and keeps
+// only the applied bound (the requested value parsed as a duration so it
+// cannot be a secret, but the option's contract is that no supplied value is
+// echoed).
 func (c *intervalConfig) clamp(d time.Duration) time.Duration {
 	clamped := d
 	if c.low > 0 && clamped < c.low {

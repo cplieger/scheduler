@@ -64,7 +64,7 @@ The whole surface is small; keep it that way.
 - `Job`, `LoopOptions`, `RunLoop`, `JitteredDelay`.
 - `Lock`, `TryLock`, `(*Lock).Unlock`, `ReadHolder`.
 - `Exclusive`, `NewExclusive`, `.Run` / `.RunOrSkip` / `.Pending`, the
-  `WithQueueCapacity` / `WithGate` / `WithStopOnError` options, `Outcome`,
+  `WithQueueCapacity` / `WithGate` options, `Outcome`,
   and the `ExclusiveLockName` / `ExclusiveQueueName` file-name constants. Its
   coalescing log messages are a pinned contract: tests assert the exact
   text, and consumers alert on them in Loki; changing one is a breaking
