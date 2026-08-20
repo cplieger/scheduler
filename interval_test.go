@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 )
 
 const testDefault = 3 * time.Hour
@@ -34,6 +35,13 @@ func TestParseInterval(t *testing.T) {
 		{name: "zero seconds selects once with option", raw: "0s", zeroAsOnce: true, wantMode: ModeOnce, wantInterval: testDefault},
 		{name: "negative falls back to built-in default", raw: "-1h", wantMode: ModeBuiltin, wantInterval: testDefault},
 		{name: "unparseable falls back to built-in default", raw: "banana", wantMode: ModeBuiltin, wantInterval: testDefault},
+		// The sentinel match folds ASCII only. Unicode simple case folding maps
+		// U+0130 onto 'i' and U+212A onto 'k', so a Unicode-aware fold would
+		// accept these as "disabled" and silently select ModeExternal —
+		// disabling the schedule for a value the contract says must warn and
+		// fall back. "off" carries neither letter, so U+0130 cannot spell it.
+		{name: "dotted capital I does not spell disabled", raw: "d\u0130sabled", wantMode: ModeBuiltin, wantInterval: testDefault},
+		{name: "kelvin sign does not spell a sentinel", raw: "dis\u212Abled", wantMode: ModeBuiltin, wantInterval: testDefault},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -289,5 +297,47 @@ func TestParseIntervalNonPositiveDefPanics(t *testing.T) {
 			}()
 			_ = ParseInterval("30m", tc.def, WithIntervalLogger(silentLogger()))
 		})
+	}
+}
+
+// TestSentinelFoldIsASCIIOnly is a tripwire on the reason ParseInterval folds
+// ASCII rather than calling strings.ToLower.
+//
+// Exactly two already-assigned runes lowercase to a *different* rune that is
+// ASCII: U+0130 to 'i' and U+212A to 'k'. That set is a property of the Unicode
+// case tables, so a future release can grow it — Unicode 17 added 55 lowercase
+// mappings, none of them ASCII-valued, but nothing guarantees the next one
+// will not be. If it grows and the sentinel match is ever changed back to a
+// Unicode-aware fold, a non-ASCII spelling of "disabled" would silently select
+// ModeExternal and disable a schedule. This test enumerates the whole rune
+// space so that day fails here rather than in production.
+func TestSentinelFoldIsASCIIOnly(t *testing.T) {
+	t.Parallel()
+
+	var launder []rune
+	for r := rune(0x80); r <= unicode.MaxRune; r++ {
+		if l := unicode.ToLower(r); l != r && l < 0x80 {
+			launder = append(launder, r)
+		}
+	}
+	if len(launder) != 2 || launder[0] != 0x0130 || launder[1] != 0x212A {
+		t.Errorf("runes lowercasing into ASCII = %U, want [U+0130 U+212A]; "+
+			"if this set grew, re-check that no new rune spells a sentinel letter", launder)
+	}
+
+	// Whatever the set is, no non-ASCII spelling may reach a sentinel.
+	for _, sentinel := range []string{"off", "disabled"} {
+		for _, r := range launder {
+			low := string(unicode.ToLower(r))
+			if !strings.Contains(sentinel, low) {
+				continue
+			}
+			spoofed := strings.Replace(sentinel, low, string(r), 1)
+			got := ParseInterval(spoofed, testDefault, WithIntervalLogger(silentLogger()))
+			if got.Mode != ModeBuiltin {
+				t.Errorf("ParseInterval(%q) Mode = %s, want built-in "+
+					"(a non-ASCII spelling of %q must not select external)", spoofed, got.Mode, sentinel)
+			}
+		}
 	}
 }

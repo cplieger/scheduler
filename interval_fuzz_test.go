@@ -15,6 +15,9 @@ func FuzzParseInterval(f *testing.F) {
 	for _, seed := range []string{
 		"", "   ", "6h", "45m", "1h30m", "off", "OFF", "disabled",
 		"0", "0s", "0m", "-1h", "banana", "  30m  ", "100000000h",
+		// The two runes that lowercase into ASCII, so a Unicode-aware fold
+		// would read these as "disabled" and disable the schedule.
+		"d\u0130sabled", "dis\u212Abled", "\u0130",
 	} {
 		f.Add(seed)
 	}
