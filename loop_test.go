@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"pgregory.net/rapid"
@@ -29,27 +30,31 @@ func TestRunLoopFiresOnStart(t *testing.T) {
 
 func TestRunLoopTicksRepeatedly(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 
-	var fires atomic.Int32
-	done := make(chan struct{})
-	go func() {
-		RunLoop(ctx, func(context.Context) { fires.Add(1) },
-			LoopOptions{Interval: 10 * time.Millisecond})
-		close(done)
-	}()
+		var fires atomic.Int32
+		done := make(chan struct{})
+		go func() {
+			RunLoop(ctx, func(context.Context) { fires.Add(1) },
+				LoopOptions{Interval: 10 * time.Millisecond})
+			close(done)
+		}()
 
-	time.Sleep(75 * time.Millisecond)
-	cancel()
-	<-done
+		synctest.Sleep(75 * time.Millisecond)
+		cancel()
+		<-done
 
-	// FireOnStart is false, so the first run is one interval in; ~75ms at a
-	// 10ms cadence yields several ticks. Assert a conservative floor to stay
-	// robust under a loaded CI scheduler.
-	if got := fires.Load(); got < 2 {
-		t.Errorf("fires = %d, want >= 2 over 75ms at a 10ms interval", got)
-	}
+		// Synthetic time makes the cadence exact instead of a floor.
+		// FireOnStart is false, so the first run is one interval in: ticks land
+		// at 10ms through 70ms and the eighth would land at 80ms, past the 75ms
+		// observation point. On a real clock this could only assert ">= 2",
+		// which a loop that fired twice and stalled would also satisfy.
+		if got := fires.Load(); got != 7 {
+			t.Errorf("fires = %d, want exactly 7 (ticks at 10ms..70ms within 75ms)", got)
+		}
+	})
 }
 
 func TestRunLoopReturnsOnNonPositiveInterval(t *testing.T) {
@@ -108,25 +113,31 @@ func TestJitteredDelayWithinBand(t *testing.T) {
 
 func TestRunLoopWithJitterTicks(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 
-	var fires atomic.Int32
-	done := make(chan struct{})
-	go func() {
-		RunLoop(ctx, func(context.Context) { fires.Add(1) },
-			LoopOptions{Interval: 10 * time.Millisecond, Jitter: 0.10})
-		close(done)
-	}()
-	time.Sleep(75 * time.Millisecond)
-	cancel()
-	<-done
+		var fires atomic.Int32
+		done := make(chan struct{})
+		go func() {
+			RunLoop(ctx, func(context.Context) { fires.Add(1) },
+				LoopOptions{Interval: 10 * time.Millisecond, Jitter: 0.10})
+			close(done)
+		}()
+		synctest.Sleep(75 * time.Millisecond)
+		cancel()
+		<-done
 
-	// Jitter keeps ticks within +/-10% of 10ms, so several fire in 75ms;
-	// a conservative floor stays robust under a loaded CI scheduler.
-	if got := fires.Load(); got < 2 {
-		t.Errorf("fires = %d, want >= 2 over 75ms at a jittered 10ms interval", got)
-	}
+		// Jitter draws each delay from [9ms, 11ms), so the count over a 75ms
+		// window is bounded but not fixed: all-minimum draws tick at 9ms..72ms
+		// (8 fires) and all-maximum draws at 11ms..66ms (6). Synthetic time
+		// removes scheduler noise, so the band is the jitter arithmetic alone
+		// rather than a floor chosen to survive a loaded runner. JitteredDelay's
+		// own band is property-tested separately.
+		if got := fires.Load(); got < 6 || got > 8 {
+			t.Errorf("fires = %d, want 6..8 over 75ms at a jittered 10ms interval", got)
+		}
+	})
 }
 
 func TestJitteredDelayClampsFractionAboveOne(t *testing.T) {
