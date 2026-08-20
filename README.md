@@ -232,7 +232,11 @@ srv.Serve(ln)
 // shutdown: ln.Close(); queue.Close(); Execute drains and returns; srv.Wait()
 
 // Trigger subcommand: submit one run, wait for its own result.
-final, err := trigger.Submit("/tmp/myapp.sock", payload{Repos: repos}, nil)
+// Pass signal.NotifyContext so Ctrl-C unwinds the wait instead of killing
+// the process with the connection half-open.
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+final, err := trigger.Submit(ctx, "/tmp/myapp.sock", payload{Repos: repos}, nil)
 // map final.OK / errors.Is(err, trigger.ErrUnreachable) to the exit code
 ```
 
@@ -278,7 +282,7 @@ Subpackage `trigger` (the single-owner broker):
 - `Listen(path) (net.Listener, error)`: owner-only unix socket with stale-file hygiene.
 - `Server[P]`: `{Queue, OnAccepted, OnRejected}`, `.Serve(ln)`, `.Wait()`; streams `Event` lines per connection.
 - `Event`: `{Kind, Reason, DurationMs, OK}`; kinds `EventQueued`, `EventStarted`, `EventDone`.
-- `Submit[P](socketPath, payload, onEvent) (Event, error)`: the synchronous client; `ErrUnreachable`, `ErrSend`, `ErrConnectionLost`; `DialTimeout`.
+- `Submit[P](ctx, socketPath, payload, onEvent) (Event, error)`: the synchronous client; `ErrUnreachable`, `ErrSend`, `ErrConnectionLost`; `DialTimeout`. Cancelling `ctx` aborts the dial and closes the connection under an in-flight read, so the call returns `context.Canceled` rather than waiting out a silent daemon. `Listen` deliberately takes no context — a unix-socket bind does not block, and the listener's lifetime is the process's.
 
 ## Unsupported by Design
 
