@@ -1,6 +1,7 @@
 package trigger_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,7 +51,7 @@ func Example() {
 
 	// Client side (the `run` subcommand): submit one request, block until
 	// its own result, map it to an exit code.
-	final, err := trigger.Submit(socketPath, payload{Repos: []string{"owner/repo"}}, nil)
+	final, err := trigger.Submit(context.Background(), socketPath, payload{Repos: []string{"owner/repo"}}, nil)
 	if err != nil {
 		fmt.Println("submit:", err)
 		return

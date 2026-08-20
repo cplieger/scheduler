@@ -40,30 +40,52 @@ var (
 // payload as the request line, relays each intermediate lifecycle event to
 // onEvent (EventQueued, EventStarted; nil onEvent skips relaying; unknown
 // kinds are ignored for forward compatibility), and returns the final done
-// event. A non-nil error wraps ErrUnreachable, ErrSend, or ErrConnectionLost;
-// the Event is only meaningful when the error is nil. Submit blocks for the
-// run's full queue-wait plus execution — triggered runs are synchronous by
-// contract (the trigger's exit code is the run's result), so there is no
-// read deadline on the event stream.
-func Submit[P any](socketPath string, payload P, onEvent func(Event)) (Event, error) {
+// event. A non-nil error wraps ErrUnreachable, ErrSend, or ErrConnectionLost,
+// or is ctx's own error when the caller cancelled; the Event is only
+// meaningful when the error is nil.
+//
+// Submit blocks for the run's full queue-wait plus execution — triggered runs
+// are synchronous by contract (the trigger's exit code is the run's result),
+// so there is deliberately no read deadline on the event stream. ctx is how a
+// caller bounds that wait instead: cancelling it aborts the dial and closes
+// the connection under an in-flight read, so Submit returns context.Canceled
+// (or context.DeadlineExceeded) rather than blocking until the daemon
+// answers. A subcommand should pass signal.NotifyContext so an interactive
+// Ctrl-C unwinds and the daemon observes the disconnect, instead of the
+// process being killed with the connection half-open.
+func Submit[P any](ctx context.Context, socketPath string, payload P, onEvent func(Event)) (Event, error) {
 	dialer := net.Dialer{Timeout: DialTimeout}
-	conn, err := dialer.DialContext(context.Background(), "unix", socketPath)
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		return Event{}, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 	defer func() { _ = conn.Close() }()
 
+	// A context has no way to interrupt a blocking socket read, so closing the
+	// connection is what unblocks awaitDone. Without this, ctx would bound the
+	// dial only — and the dial is the one part of Submit that is already
+	// bounded, by DialTimeout.
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopOnCancel()
+
 	if err := json.NewEncoder(conn).Encode(payload); err != nil {
 		return Event{}, fmt.Errorf("%w: %w", ErrSend, err)
 	}
-	return awaitDone(json.NewDecoder(conn), onEvent)
+	return awaitDone(ctx, json.NewDecoder(conn), onEvent)
 }
 
 // awaitDone consumes the daemon's event stream until the final done event.
-func awaitDone(dec *json.Decoder, onEvent func(Event)) (Event, error) {
+func awaitDone(ctx context.Context, dec *json.Decoder, onEvent func(Event)) (Event, error) {
 	for {
 		var ev Event
 		if err := dec.Decode(&ev); err != nil {
+			// Cancellation reaches this read by closing the connection, so the
+			// decode error is the symptom and ctx.Err() is the cause. Report
+			// the cause: a caller distinguishing "I gave up" from "the daemon
+			// died mid-run" is the whole point of the two classes.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Event{}, ctxErr
+			}
 			return Event{}, fmt.Errorf("%w: %w", ErrConnectionLost, err)
 		}
 		switch ev.Kind {
