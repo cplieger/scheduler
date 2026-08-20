@@ -105,7 +105,7 @@ func runPass(ctx context.Context) {
 | --- | --- |
 | `"30m"`, `"1h30m"` (positive Go duration) | `ModeBuiltin`, that cadence (clamped by `WithBounds`) |
 | `""` (unset) | `ModeBuiltin`, the default cadence |
-| `"off"`, `"disabled"` (case-insensitive) | `ModeExternal` |
+| `"off"`, `"disabled"` (case-insensitive across ASCII letters only) | `ModeExternal` |
 | `"0"`, `"0s"` (zero) | `ModeExternal`, or `ModeOnce` with `WithZeroAsOnce(true)` |
 | `"-1h"` (negative) | `ModeBuiltin` at default + a warning (a likely typo) |
 | `"banana"` (unparseable) | `ModeBuiltin` at default + a warning |
@@ -123,8 +123,8 @@ useful diagnostics.
 ### Overlap guard and coalescing
 
 `TryLock` / `Unlock` serialize runs across both the in-process loop and an
-out-of-band `docker exec` trigger. `ReadHolder` reads how long the current
-holder has held the lock (observability only). A trigger that arrives mid-run
+out-of-band `docker exec` trigger. `ReadHolder` reads when the current holder
+acquired the lock (observability only). A trigger that arrives mid-run
 is not dropped: `Exclusive` (next section) queues it as a coalesced rerun.
 
 ### Run coalescing across processes
@@ -168,7 +168,7 @@ The lock is a `flock(2)` (`cycle.lock` in the directory), so the kernel
 releases it when the holding process dies: a crashed run never wedges the
 scheduler, and a queue counter orphaned by a crash is cleared at the next
 acquisition. `Pending` reports the queued-request count for observability, and
-`ReadHolder` on `ExclusiveLockName` reports how long the current cycle has run.
+`ReadHolder` on `ExclusiveLockName` reports when the current cycle started.
 
 Three policy edges are deliberate, and all deferral is demand-preserving (the
 queue counter survives; the next run satisfies it):
@@ -282,7 +282,7 @@ Subpackage `trigger` (the single-owner broker):
 - `Listen(path) (net.Listener, error)`: owner-only unix socket with stale-file hygiene.
 - `Server[P]`: `{Queue, OnAccepted, OnRejected}`, `.Serve(ln)`, `.Wait()`; streams `Event` lines per connection.
 - `Event`: `{Kind, Reason, DurationMs, OK}`; kinds `EventQueued`, `EventStarted`, `EventDone`.
-- `Submit[P](ctx, socketPath, payload, onEvent) (Event, error)`: the synchronous client; `ErrUnreachable`, `ErrSend`, `ErrConnectionLost`; `DialTimeout`. Cancelling `ctx` aborts the dial and closes the connection under an in-flight read, so the call returns `context.Canceled` rather than waiting out a silent daemon. `Listen` deliberately takes no context — a unix-socket bind does not block, and the listener's lifetime is the process's.
+- `Submit[P](ctx, socketPath, payload, onEvent) (Event, error)`: the synchronous client; `ErrUnreachable`, `ErrSend`, `ErrConnectionLost`; `DialTimeout`. Cancelling `ctx` stops the wait.
 
 ## Unsupported by Design
 
