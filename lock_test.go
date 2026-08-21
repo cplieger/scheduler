@@ -3,6 +3,7 @@ package scheduler
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,6 +109,28 @@ func TestReadHolderUnreadablePath(t *testing.T) {
 	}
 	if !since.IsZero() {
 		t.Errorf("ReadHolder(directory) since = %s, want zero time", since)
+	}
+}
+
+// TestReadHolderFileLongerThanTheReadWindow pins that the fixed read buffer is
+// a window, not a size requirement: a lock file long enough to fill it without
+// reaching EOF still yields the holder timestamp, so a short read is the
+// tolerated case rather than the required one.
+func TestReadHolderFileLongerThanTheReadWindow(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".padded.lock")
+	want := time.Date(2026, 8, 21, 10, 30, 0, 0, time.UTC)
+	padded := want.Format(time.RFC3339Nano) + strings.Repeat(" ", 80)
+	if err := os.WriteFile(path, []byte(padded), 0o644); err != nil {
+		t.Fatalf("seeding lock file: %v", err)
+	}
+
+	since, known := ReadHolder(path)
+	if !known {
+		t.Fatalf("ReadHolder(%d-byte file) known = false, want true", len(padded))
+	}
+	if !since.Equal(want) {
+		t.Errorf("ReadHolder(%d-byte file) since = %s, want %s", len(padded), since, want)
 	}
 }
 

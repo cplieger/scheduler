@@ -42,6 +42,19 @@ func assertNotLogged(t *testing.T, buf *bytes.Buffer, msg string) {
 	}
 }
 
+// assertAttr fails the test unless the buffer carries the attribute key with
+// exactly value. slog's text handler separates attributes with spaces and ends
+// each record with a newline, so pinning the terminator is what makes the
+// match exact: a bare "attempt=1" substring would also accept a rendered
+// attempt=15.
+func assertAttr(t *testing.T, buf *bytes.Buffer, key, value string) {
+	t.Helper()
+	out, pair := buf.String(), key+"="+value
+	if !strings.Contains(out, pair+" ") && !strings.Contains(out, pair+"\n") {
+		t.Errorf("log = %q, want the attribute %s", out, pair)
+	}
+}
+
 // quoteMsg quotes a message the way slog's text handler renders multi-word
 // values, so assertions pin the exact contract text.
 func quoteMsg(msg string) string {
@@ -109,6 +122,9 @@ func TestExclusiveRunQueuesWhileBusy(t *testing.T) {
 		t.Errorf("job ran %d times while queued, want 0", runs)
 	}
 	assertLogged(t, buf, "cycle lock busy; queued rerun request")
+	// The line reports the queue depth INCLUDING this request, so a requester
+	// reading the log knows a run is owed to it.
+	assertAttr(t, buf, "pending", "1")
 
 	if pending, perr := e.Pending(); perr != nil || pending != 1 {
 		t.Errorf("Pending = (%d, %v), want (1, nil)", pending, perr)
@@ -201,9 +217,7 @@ func TestExclusiveConsumeLoop(t *testing.T) {
 		t.Errorf("job ran %d times, want 2 (initial + one queued rerun)", runs)
 	}
 	assertLogged(t, buf, "running queued cycle request")
-	if !strings.Contains(buf.String(), "attempt=1") {
-		t.Errorf("log = %q, want rerun attribution attempt=1", buf.String())
-	}
+	assertAttr(t, buf, "attempt", "1")
 	if pending, perr := e.Pending(); perr != nil || pending != 0 {
 		t.Errorf("Pending after drain = (%d, %v), want (0, nil)", pending, perr)
 	}
@@ -309,6 +323,28 @@ func TestExclusiveZeroValueQueuesLikeConstructed(t *testing.T) {
 	}
 	if pending, perr := e.Pending(); perr != nil || pending != 1 {
 		t.Errorf("Pending = (%d, %v), want (1, nil)", pending, perr)
+	}
+}
+
+// TestExclusiveQueueCapacityIsLastWins pins the fleet option convention on
+// WithQueueCapacity: repeated applications resolve to the last value, so a
+// composition root narrowing a wider default really gets the narrow queue.
+func TestExclusiveQueueCapacityIsLastWins(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	e := NewExclusive(dir, silentLogger(), WithQueueCapacity(3), WithQueueCapacity(1))
+
+	holder, ok, err := TryLock(filepath.Join(dir, ExclusiveLockName))
+	if err != nil || !ok {
+		t.Fatalf("seed TryLock = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+	defer holder.Unlock()
+
+	if out, rerr := e.Run(failIfRun(t)); rerr != nil || out != OutcomeQueued {
+		t.Errorf("first busy Run = (%s, %v), want (queued, nil)", out, rerr)
+	}
+	if out, rerr := e.Run(failIfRun(t)); rerr != nil || out != OutcomeDiscarded {
+		t.Errorf("second busy Run = (%s, %v), want (discarded, nil) (the later capacity of 1 must win)", out, rerr)
 	}
 }
 
@@ -563,6 +599,80 @@ func TestExclusiveInfraError(t *testing.T) {
 	}
 	if out != OutcomeNone {
 		t.Errorf("RunOrSkip outcome = %s, want none", out)
+	}
+}
+
+// TestExclusiveReportsAcquisitionQueueError pins the counter-failure half of
+// Run's error contract at the acquisition step: the lock was won, so the job
+// runs, and the queue infrastructure failure is reported alongside it instead
+// of being swallowed into a clean return.
+//
+// The fixture puts a directory where the counter file belongs, so every
+// counter transaction fails with EISDIR, and the job clears it again. The
+// acquisition step is then the only step that failed, which is what makes the
+// assertion falsifiable: a later failure would keep the error non-nil on its
+// own.
+func TestExclusiveReportsAcquisitionQueueError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, ExclusiveQueueName)
+	if err := os.Mkdir(blocked, 0o750); err != nil {
+		t.Fatalf("blocking the counter path: %v", err)
+	}
+	e := NewExclusive(dir, silentLogger())
+
+	runs := 0
+	out, err := e.Run(func() error {
+		runs++
+		if rmErr := os.Remove(blocked); rmErr != nil {
+			t.Errorf("unblocking the counter path: %v", rmErr)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Error("Run err = nil, want the acquisition step's counter failure reported")
+	}
+	if out != OutcomeRan {
+		t.Errorf("Run outcome = %s, want ran (the job did run)", out)
+	}
+	if runs != 1 {
+		t.Errorf("job ran %d times, want 1", runs)
+	}
+}
+
+// TestExclusiveReportsPostRunQueueError pins the same contract for the
+// post-release re-check: a counter failure discovered only after the job
+// finished still reaches the caller. The gate closes during the pass, so the
+// consume loop never touches the counter and the re-check is the only step
+// that reads it after the job blocked the path.
+func TestExclusiveReportsPostRunQueueError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	counter := filepath.Join(dir, ExclusiveQueueName)
+	var gateOpen atomic.Bool
+	gateOpen.Store(true)
+	e := NewExclusive(dir, silentLogger(), WithGate(gateOpen.Load))
+
+	runs := 0
+	out, err := e.Run(func() error {
+		runs++
+		gateOpen.Store(false) // shutdown lands during the pass: no rerun probe
+		if rmErr := os.Remove(counter); rmErr != nil {
+			t.Errorf("removing the counter file: %v", rmErr)
+		}
+		if mkErr := os.Mkdir(counter, 0o750); mkErr != nil {
+			t.Errorf("blocking the counter path: %v", mkErr)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Error("Run err = nil, want the post-release re-check's counter failure reported")
+	}
+	if out != OutcomeRan {
+		t.Errorf("Run outcome = %s, want ran", out)
+	}
+	if runs != 1 {
+		t.Errorf("job ran %d times, want 1 (the gate closed before any rerun)", runs)
 	}
 }
 

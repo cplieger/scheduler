@@ -93,6 +93,37 @@ func TestJitteredDelayNoJitterReturnsInterval(t *testing.T) {
 	if got := JitteredDelay(0, 0.1); got != 0 {
 		t.Errorf("JitteredDelay(0, 0.1) = %s, want 0", got)
 	}
+	// A negative interval is returned untouched as well, so a caller that
+	// passed one gets its own value back rather than a jittered variant of it.
+	if got := JitteredDelay(-time.Hour, 0.5); got != -time.Hour {
+		t.Errorf("JitteredDelay(-1h, 0.5) = %s, want -1h", got)
+	}
+}
+
+// TestJitteredDelaySpansBothSidesOfTheInterval pins that the ±band actually
+// spreads. The band assertion alone cannot see this: a delay pinned to the
+// interval every single time sits inside [interval−spread, interval+spread]
+// and would spread no restart herd at all.
+func TestJitteredDelaySpansBothSidesOfTheInterval(t *testing.T) {
+	t.Parallel()
+	const (
+		interval = time.Hour
+		draws    = 200
+	)
+	var below, above int
+	for range draws {
+		d := JitteredDelay(interval, 0.10)
+		if d < interval {
+			below++
+		}
+		if d > interval {
+			above++
+		}
+	}
+	if below == 0 || above == 0 {
+		t.Errorf("JitteredDelay(%s, 0.10) over %d draws landed %d below and %d above %s, want both sides drawn",
+			interval, draws, below, above, interval)
+	}
 }
 
 func TestJitteredDelayWithinBand(t *testing.T) {
