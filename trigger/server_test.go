@@ -535,3 +535,31 @@ func TestRelayEvents_FastRunEmitsStartedBeforeDone(t *testing.T) {
 		}
 	}
 }
+
+// TestRelayEvents_DepartedClientLogsEachFailedWrite pins the observable half
+// of the best-effort event write: a status line that cannot reach a departed
+// client is reported at debug level, so an operator reading the daemon log can
+// tell a lost event stream from a run that never happened. Not parallel: it
+// captures the process-global slog default.
+func TestRelayEvents_DepartedClientLogsEachFailedWrite(t *testing.T) {
+	rec := captureLogs(t)
+
+	j := NewJob(TriggerExternal, testPayload{})
+	j.Start()
+	j.Finish(Outcome{OK: true, Duration: time.Millisecond})
+
+	server, client := net.Pipe()
+	_ = client.Close() // depart before any event can be written
+	relayEvents(server, j)
+	_ = server.Close()
+
+	failed := 0
+	for _, r := range rec.snapshot() {
+		if r.Level == slog.LevelDebug && strings.Contains(r.Message, "trigger event write failed") {
+			failed++
+		}
+	}
+	if failed != 2 {
+		t.Errorf("event-write failure logs = %d, want 2 (started and done both hit the departed client)", failed)
+	}
+}

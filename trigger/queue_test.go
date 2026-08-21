@@ -114,3 +114,15 @@ func TestQueue_NegativeCapacityPanics(t *testing.T) {
 	}()
 	_ = NewQueue[struct{}](-1)
 }
+
+// TestQueue_ZeroCapacityIsLegal pins the other side of NewQueue's capacity
+// precondition: zero is non-negative, so it builds an unbuffered handoff
+// instead of panicking, and a submission nobody is waiting to receive is
+// rejected as full rather than blocking the trigger.
+func TestQueue_ZeroCapacityIsLegal(t *testing.T) {
+	t.Parallel()
+	q := NewQueue[struct{}](0)
+	if err := q.Submit(NewJob(TriggerExternal, struct{}{})); !errors.Is(err, ErrFull) {
+		t.Errorf("Submit() on an unbuffered queue with no receiver = %v, want ErrFull", err)
+	}
+}

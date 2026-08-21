@@ -29,6 +29,7 @@ func TestParseInterval(t *testing.T) {
 		{name: "disabled selects external", raw: "disabled", wantMode: ModeExternal, wantInterval: testDefault},
 		{name: "off is case-insensitive", raw: "OFF", wantMode: ModeExternal, wantInterval: testDefault},
 		{name: "disabled is case-insensitive", raw: "Disabled", wantMode: ModeExternal, wantInterval: testDefault},
+		{name: "fully uppercase disabled selects external", raw: "DISABLED", wantMode: ModeExternal, wantInterval: testDefault},
 		{name: "zero selects external by default", raw: "0", wantMode: ModeExternal, wantInterval: testDefault},
 		{name: "zero seconds selects external by default", raw: "0s", wantMode: ModeExternal, wantInterval: testDefault},
 		{name: "zero selects once with option", raw: "0", zeroAsOnce: true, wantMode: ModeOnce, wantInterval: testDefault},
