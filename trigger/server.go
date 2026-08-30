@@ -47,8 +47,15 @@ func Listen(path string) (net.Listener, error) {
 	}
 	// Narrow the umask so the socket is born owner-only; the Chmod below is
 	// then belt-and-braces instead of closing a world-connectable window.
-	// Callers run Listen during single-threaded boot, before any other
-	// goroutine creates files, so the process-wide umask swap is safe.
+	//
+	// The swap is PROCESS-WIDE, so this is safe only while nothing else in the
+	// process is creating files: a directory born inside this window is
+	// drw-------, and its unprivileged owner can then neither create entries in
+	// it nor unlink from it. Production callers satisfy that by calling Listen
+	// during single-threaded boot. A test suite does not get it for free — two
+	// parallel tests, one binding and one calling os.MkdirTemp, are enough to
+	// corrupt the second one's directory, and the failure is invisible under
+	// root because root bypasses the directory permission check.
 	oldMask := syscall.Umask(0o177)
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "unix", path)
