@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -158,5 +159,83 @@ func TestSubmit_CancellationAbortsTheWait(t *testing.T) {
 	// distinguishes "I gave up" from "the daemon died mid-run".
 	if errors.Is(err, ErrConnectionLost) {
 		t.Errorf("Submit() error = %v, want context.Canceled and NOT ErrConnectionLost", err)
+	}
+}
+
+// TestSubmit_CancelledDialReportsTheCancellation pins the doc's cancellation
+// clause on the DIAL arm. A cancelled DialContext error satisfies errors.Is for
+// context.Canceled AND for whatever class it is wrapped in, so before the fix
+// this arm returned an error matching both sentinels at once — and a caller
+// testing the transport sentinel first, the order this package documents them
+// in, diagnosed an operator's Ctrl-C as an unreachable daemon. The daemon here
+// is up and listening, so ErrUnreachable would be false as well as unhelpful.
+func TestSubmit_CancelledDialReportsTheCancellation(t *testing.T) {
+	t.Parallel()
+
+	sock, _ := startTestServer(t, runOK)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := Submit(ctx, sock, testPayload{}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Submit() error = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, ErrUnreachable) {
+		t.Errorf("Submit() error = %v, want context.Canceled and NOT ErrUnreachable "+
+			"(the daemon is listening; the caller cancelled)", err)
+	}
+}
+
+// TestSubmit_CancelledSendReportsTheCancellation pins the same clause on the
+// SEND arm, which is the harder half: cancellation reaches an in-flight write
+// by closing the connection, so the write fails with net.ErrClosed and its
+// chain carries no context error at all. No errors.Is test over the documented
+// taxonomy could identify it, and unlike the dial arm no reordering in the
+// caller reaches it — only consulting ctx.Err() does.
+//
+// The listener accepts and never reads, so a payload larger than the socket
+// send buffer leaves Submit blocked inside Encode when the cancellation lands.
+func TestSubmit_CancelledSendReportsTheCancellation(t *testing.T) {
+	t.Parallel()
+
+	sock := testSocketPath(t)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("Listen(%q) = %v", sock, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	accepted := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		close(accepted)
+		<-release // never read: the client's write must fill the buffer and block
+		_ = conn.Close()
+	}()
+
+	// ~2 MB, well past any unix-socket send buffer.
+	big := testPayload{Repos: make([]string, 200_000)}
+	for i := range big.Repos {
+		big.Repos[i] = "owner/repo"
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		<-accepted // the dial has returned, so a cancellation now lands on the write
+		cancel()
+	}()
+
+	_, err = Submit(ctx, sock, big, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Submit() error = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, ErrSend) {
+		t.Errorf("Submit() error = %v, want context.Canceled and NOT ErrSend "+
+			"(the send failed because the caller cancelled)", err)
 	}
 }
