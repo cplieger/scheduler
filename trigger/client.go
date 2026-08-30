@@ -57,7 +57,7 @@ func Submit[P any](ctx context.Context, socketPath string, payload P, onEvent fu
 	dialer := net.Dialer{Timeout: DialTimeout}
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
-		return Event{}, fmt.Errorf("%w: %w", ErrUnreachable, err)
+		return Event{}, classify(ctx, ErrUnreachable, err)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -69,9 +69,36 @@ func Submit[P any](ctx context.Context, socketPath string, payload P, onEvent fu
 	defer stopOnCancel()
 
 	if err := json.NewEncoder(conn).Encode(payload); err != nil {
-		return Event{}, fmt.Errorf("%w: %w", ErrSend, err)
+		return Event{}, classify(ctx, ErrSend, err)
 	}
 	return awaitDone(ctx, json.NewDecoder(conn), onEvent)
+}
+
+// classify returns ctx's own error when the caller cancelled, and otherwise
+// wraps cause under the transport class it belongs to. All three of Submit's
+// failure arms go through here, because a cancelled operation reaches each of
+// them as an ordinary I/O error and the cause is what the caller needs: it
+// distinguishes "I gave up" from "the daemon died mid-run", which is the whole
+// point of publishing the classes separately.
+//
+// The two arms this exists for are not symmetric, and neither is fixable at the
+// call site. A cancelled DialContext error satisfies errors.Is for
+// context.Canceled AND for the class it gets wrapped in, so a caller testing
+// the transport sentinel first — the order this file's own doc lists them in —
+// diagnoses an operator's Ctrl-C as an unreachable daemon. A cancelled write
+// fails with net.ErrClosed, because cancellation reaches it by closing the
+// connection, so its chain carries no context error at all and NO errors.Is
+// test over the documented taxonomy can identify it. Reordering a consumer's
+// switch fixes the first and cannot reach the second.
+//
+// The race is accepted: a genuine failure landing in the same instant as a
+// cancellation is reported as the cancellation. The caller asked to stop, so
+// that is the more useful answer.
+func classify(ctx context.Context, class, cause error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return fmt.Errorf("%w: %w", class, cause)
 }
 
 // awaitDone consumes the daemon's event stream until the final done event.
@@ -80,13 +107,8 @@ func awaitDone(ctx context.Context, dec *json.Decoder, onEvent func(Event)) (Eve
 		var ev Event
 		if err := dec.Decode(&ev); err != nil {
 			// Cancellation reaches this read by closing the connection, so the
-			// decode error is the symptom and ctx.Err() is the cause. Report
-			// the cause: a caller distinguishing "I gave up" from "the daemon
-			// died mid-run" is the whole point of the two classes.
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return Event{}, ctxErr
-			}
-			return Event{}, fmt.Errorf("%w: %w", ErrConnectionLost, err)
+			// decode error is only ever the symptom; classify reports the cause.
+			return Event{}, classify(ctx, ErrConnectionLost, err)
 		}
 		switch ev.Kind {
 		case EventQueued, EventStarted:
