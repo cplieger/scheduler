@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +50,7 @@ func TestSubmit_FinalEventOverRealSocket(t *testing.T) {
 // ErrUnreachable (the trigger reports a failed job), never a hang.
 func TestSubmit_DaemonUnreachable(t *testing.T) {
 	t.Parallel()
-	sock := filepath.Join(t.TempDir(), "absent.sock")
+	sock := absentSocketPath(t)
 	_, err := Submit(t.Context(), sock, struct{}{}, nil)
 	if !errors.Is(err, ErrUnreachable) {
 		t.Errorf("Submit() error = %v, want ErrUnreachable", err)

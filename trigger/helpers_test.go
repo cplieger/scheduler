@@ -2,6 +2,7 @@ package trigger
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -41,6 +42,28 @@ func testSocketPath(t *testing.T) string {
 		path = filepath.Join(dir, "s.sock")
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return path
+}
+
+// absentSocketPath returns a socket path that does not exist, creating nothing.
+//
+// A test needing an ABSENT socket must not reach for t.TempDir(). Listen swaps
+// the process-wide umask to 0o177, and a directory born inside that window is
+// drw-------, so t.TempDir's numbered subdir then fails with EACCES. The window
+// is opened by TestSubmit_CancellationAbortsTheWait (parallel, and reaches
+// Listen through startTestServer); this test was the only other parallel one
+// creating a directory. Root bypasses the directory permission check, so it
+// reproduces unprivileged only — it reddened a sync PR while main was green.
+// Creating nothing leaves the window nothing to corrupt.
+func absentSocketPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(os.TempDir(), "trig-absent", t.Name()+".sock")
+	if len(path) > maxSunPath {
+		t.Fatalf("absent socket path %q is %d bytes, over sun_path %d", path, len(path), maxSunPath)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent socket path %q must not exist: Lstat = %v", path, err)
+	}
 	return path
 }
 
