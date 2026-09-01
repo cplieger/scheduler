@@ -38,11 +38,11 @@ const (
 	maxRequestBytes = 8 << 20
 )
 
-// ErrAddrInUse reports that path is bound by a LIVE listener, so this process
-// must not become a second owner of it. Callers treat it as fatal: a consumer
-// whose whole design rests on one owner per socket has nothing useful to do
-// with a second.
-var ErrAddrInUse = errors.New("socket already has a live listener")
+// errAddrInUse classifies a path bound by a live listener inside Listen's
+// one-retry flow. Callers need only the returned error and path: every current
+// consumer treats any bind failure as fatal, so exporting this would add an API
+// nobody uses and force a minor release for an implementation detail.
+var errAddrInUse = errors.New("socket already has a live listener")
 
 // Listen binds the unix socket at path with owner-only permissions.
 //
@@ -62,7 +62,7 @@ var ErrAddrInUse = errors.New("socket already has a live listener")
 // schedulers each publish an invariant that two passes can never overlap.
 //
 // On EADDRINUSE the path is DIALLED. Something answering proves a live owner,
-// so this returns ErrAddrInUse naming it; nothing answering proves the socket
+// so this returns errAddrInUse naming it; nothing answering proves the socket
 // is dead, so the file is unlinked and the bind retried exactly once. The retry
 // is not a loop: a second EADDRINUSE after a successful unlink means another
 // process bound it in between, which is the live-owner answer again.
@@ -73,14 +73,14 @@ func Listen(path string) (net.Listener, error) {
 	}
 	if c, derr := dialProbe(path); derr == nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("%w: %s", ErrAddrInUse, path)
+		return nil, fmt.Errorf("%w: %s", errAddrInUse, path)
 	}
 	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 		return nil, rerr
 	}
 	ln, err = bindOwnerOnly(path)
 	if err != nil && errors.Is(err, syscall.EADDRINUSE) {
-		return nil, fmt.Errorf("%w: %s", ErrAddrInUse, path)
+		return nil, fmt.Errorf("%w: %s", errAddrInUse, path)
 	}
 	return ln, err
 }

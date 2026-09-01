@@ -582,10 +582,10 @@ func TestListen_RefusesALiveSocketInsteadOfStealingIt(t *testing.T) {
 	second, err := Listen(sock)
 	if err == nil {
 		_ = second.Close()
-		t.Fatal("Listen() over a LIVE socket = nil error, want ErrAddrInUse — a second owner must never be created")
+		t.Fatal("Listen() over a LIVE socket = nil error, want errAddrInUse — a second owner must never be created")
 	}
-	if !errors.Is(err, ErrAddrInUse) {
-		t.Errorf("Listen() error = %v, want ErrAddrInUse", err)
+	if !errors.Is(err, errAddrInUse) {
+		t.Errorf("Listen() error = %v, want errAddrInUse", err)
 	}
 	if !strings.Contains(err.Error(), sock) {
 		t.Errorf("Listen() error = %q, want it to name the contested path %q", err, sock)
@@ -619,7 +619,7 @@ func TestListen_StaleSocketIsUnlinkedNotRefused(t *testing.T) {
 		t.Fatalf("Listen() over a STALE socket = %v, want nil (the file is dead, so reclaim it)", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	if errors.Is(err, ErrAddrInUse) {
+	if errors.Is(err, errAddrInUse) {
 		t.Error("a stale socket must not be reported as a live owner")
 	}
 }
