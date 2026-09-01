@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -37,14 +38,74 @@ const (
 	maxRequestBytes = 8 << 20
 )
 
-// Listen binds the unix socket at path with owner-only permissions. A stale
-// socket file from a SIGKILLed predecessor is removed first (bind fails on an
-// existing path otherwise); an in-container /tmp is per-container, so the
-// stale file can only be the daemon's own previous life's.
+// ErrAddrInUse reports that path is bound by a LIVE listener, so this process
+// must not become a second owner of it. Callers treat it as fatal: a consumer
+// whose whole design rests on one owner per socket has nothing useful to do
+// with a second.
+var ErrAddrInUse = errors.New("socket already has a live listener")
+
+// Listen binds the unix socket at path with owner-only permissions.
+//
+// It binds FIRST and treats EADDRINUSE as a question rather than an obstacle,
+// because the kernel already supplies the single-instance guard this package's
+// consumers depend on: binding a path a live listener still owns fails, and
+// closing a listener unlinks its own path (both measured). So a leftover file
+// means a SIGKILLed predecessor — the only case an unlink is for.
+//
+// It used to unlink unconditionally before binding, under a comment reasoning
+// that an in-container /tmp is per-container, so the file could only be this
+// daemon's own previous life's. Every consumer's CLI falsifies that: a second
+// invocation in the same container reached this line, silently unlinked the
+// live socket, bound the path and served the next request, while the first
+// process — PID 1 — kept an unreferenced listener and said nothing. Measured:
+// unlink-then-bind really does steal a live socket, and the three socket-shaped
+// schedulers each publish an invariant that two passes can never overlap.
+//
+// On EADDRINUSE the path is DIALLED. Something answering proves a live owner,
+// so this returns ErrAddrInUse naming it; nothing answering proves the socket
+// is dead, so the file is unlinked and the bind retried exactly once. The retry
+// is not a loop: a second EADDRINUSE after a successful unlink means another
+// process bound it in between, which is the live-owner answer again.
 func Listen(path string) (net.Listener, error) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	ln, err := bindOwnerOnly(path)
+	if err == nil || !errors.Is(err, syscall.EADDRINUSE) {
+		return ln, err
 	}
+	if c, derr := dialProbe(path); derr == nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("%w: %s", ErrAddrInUse, path)
+	}
+	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return nil, rerr
+	}
+	ln, err = bindOwnerOnly(path)
+	if err != nil && errors.Is(err, syscall.EADDRINUSE) {
+		return nil, fmt.Errorf("%w: %s", ErrAddrInUse, path)
+	}
+	return ln, err
+}
+
+// probeTimeout bounds the liveness dial in Listen. A connect to a unix socket
+// with a listening peer completes in the kernel, so this is not a latency budget
+// — it is the guard against a dial that never returns taking boot with it.
+const probeTimeout = 2 * time.Second
+
+// dialProbe asks whether anything is listening on path. It exists as a named
+// function because the answer decides between reclaiming a dead socket and
+// refusing a live one, and because a bare net.Dial would carry no timeout.
+//
+// context.Background is correct here rather than a caller's context: Listen runs
+// at single-threaded boot and takes no context (see its umask note), and the
+// bound that matters is this probe's own, not the caller's lifetime.
+func dialProbe(path string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	var d net.Dialer
+	return d.DialContext(ctx, "unix", path)
+}
+
+// bindOwnerOnly binds path and leaves it readable and writable by its owner only.
+func bindOwnerOnly(path string) (net.Listener, error) {
 	// Narrow the umask so the socket is born owner-only; the Chmod below is
 	// then belt-and-braces instead of closing a world-connectable window.
 	//
