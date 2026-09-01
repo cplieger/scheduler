@@ -563,3 +563,63 @@ func TestRelayEvents_DepartedClientLogsEachFailedWrite(t *testing.T) {
 		t.Errorf("event-write failure logs = %d, want 2 (started and done both hit the departed client)", failed)
 	}
 }
+
+// TestListen_RefusesALiveSocketInsteadOfStealingIt pins the fix for the defect
+// that made a second daemon possible in one container. Listen used to unlink
+// unconditionally before binding, so this call SUCCEEDED: it took the path away
+// from the live listener, which kept an unreferenced socket and never learned it
+// had been displaced. The kernel already refuses the bind, so the only thing the
+// old pre-emptive unlink bought was defeating that refusal.
+func TestListen_RefusesALiveSocketInsteadOfStealingIt(t *testing.T) {
+	sock := testSocketPath(t)
+
+	live, err := Listen(sock)
+	if err != nil {
+		t.Fatalf("setup live listener: %v", err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+
+	second, err := Listen(sock)
+	if err == nil {
+		_ = second.Close()
+		t.Fatal("Listen() over a LIVE socket = nil error, want ErrAddrInUse — a second owner must never be created")
+	}
+	if !errors.Is(err, ErrAddrInUse) {
+		t.Errorf("Listen() error = %v, want ErrAddrInUse", err)
+	}
+	if !strings.Contains(err.Error(), sock) {
+		t.Errorf("Listen() error = %q, want it to name the contested path %q", err, sock)
+	}
+
+	// The live listener still owns the path: a dial must reach IT, not a
+	// displaced second socket.
+	c, derr := net.Dial("unix", sock)
+	if derr != nil {
+		t.Fatalf("dial after refused second Listen = %v, want the original listener still serving", derr)
+	}
+	_ = c.Close()
+}
+
+// TestListen_StaleSocketIsUnlinkedNotRefused is the other half of the same
+// decision: the dial probe is what tells a dead socket from a live one, so a
+// SIGKILLed predecessor's file must still be reclaimed rather than reported as
+// a live owner. Without the probe this case would fail boot forever.
+func TestListen_StaleSocketIsUnlinkedNotRefused(t *testing.T) {
+	sock := testSocketPath(t)
+
+	stale, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("setup stale socket: %v", err)
+	}
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = stale.Close()
+
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatalf("Listen() over a STALE socket = %v, want nil (the file is dead, so reclaim it)", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	if errors.Is(err, ErrAddrInUse) {
+		t.Error("a stale socket must not be reported as a live owner")
+	}
+}
