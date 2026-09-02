@@ -55,3 +55,26 @@ func ExampleTryLock() {
 	// first acquire: true
 	// second acquire while held: false
 }
+
+func ExampleStamp() {
+	dir, err := os.MkdirTemp("", "scheduler_example_stamp")
+	if err != nil {
+		return
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	stamp := scheduler.NewStamp(filepath.Join(dir, "last-run"))
+	interval := 6 * time.Hour
+
+	// At boot: fire the startup run only when no recent run survived the
+	// restart (wire the result into LoopOptions.FireOnStart).
+	fmt.Println("startup run due:", stamp.Due(interval, time.Now(), scheduler.RetryFailed))
+
+	// The executor records each completed scheduled run and its outcome.
+	if err := stamp.Record(true); err == nil {
+		fmt.Println("due after a fresh success:", stamp.Due(interval, time.Now(), scheduler.RetryFailed))
+	}
+	// Output:
+	// startup run due: true
+	// due after a fresh success: false
+}

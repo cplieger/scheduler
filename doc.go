@@ -10,6 +10,13 @@
 //   - RunLoop drives the built-in mode: a startup fire plus a jittered interval
 //     ticker that drains on context cancellation. JitteredDelay is its pure,
 //     testable core.
+//   - Stamp records when a scheduled run last completed and whether it
+//     succeeded, in a file that can outlive the process. A composition root
+//     computes RunLoop's FireOnStart from Stamp.Due, so a container recreated
+//     minutes after a successful pass does not repeat it, under an explicit
+//     FailurePolicy (retry a failed run at startup, or leave the retry to the
+//     interval ticker). Which runs count and where the file lives stay
+//     app-side.
 //   - TryLock / Unlock / ReadHolder are an advisory flock(2) overlap guard so
 //     a run and an out-of-band trigger never execute two jobs at once (a
 //     trigger arriving mid-run is queued by Exclusive, below).
