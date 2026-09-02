@@ -120,6 +120,41 @@ interval passes through secret-capable config expansion, where a typo could plac
 expanded secret in the field; plain env-var reads should keep the default echo, which is
 useful diagnostics.
 
+### Restart-aware startup fire
+
+`FireOnStart: true` runs the job once at boot for immediate freshness. For a
+container that is recreated often (an image that tracks a fast-moving
+upstream), that startup fire repeats work the previous container finished
+minutes earlier. `Stamp` records when a scheduled run last completed, in a
+file on a persisted volume, so the startup fire only happens when it is due:
+
+```go
+stamp := scheduler.NewStamp("/data/.myjob-last-run")
+
+due := stamp.Due(sched.Interval, time.Now(), scheduler.RetryFailed)
+scheduler.RunLoop(ctx, runPass, scheduler.LoopOptions{
+	Interval:    sched.Interval,
+	FireOnStart: due, // fire at boot only when no recent run survived the restart
+})
+```
+
+The job records each completed scheduled pass and its outcome with
+`stamp.Record(ok)`, and the caller decides which runs count (a manually
+triggered, scoped run typically does not). The `FailurePolicy` parameter states
+what a failed last run means, explicitly:
+
+- `RetryFailed`: only a fresh **successful** run suppresses the startup fire. A
+  restart after a failure runs again immediately, so an operator who fixes a
+  bad configuration and recreates the container gets instant feedback.
+- `CountFailed`: any completed run holds its schedule slot; the interval ticker
+  owns the retry. For jobs whose failed passes are expensive enough that a
+  restart must not repeat them early.
+
+A missing, torn, or unreadable record reads as due, so the failure direction is
+an extra startup run, never a skipped schedule. Without a persisted volume the
+file never survives a recreate and behavior degrades to the unconditional
+startup fire.
+
 ### Overlap guard and coalescing
 
 `TryLock` / `Unlock` serialize runs across both the in-process loop and an
@@ -265,6 +300,9 @@ split as `SlotFile`.
 - `LoopOptions`: `{Interval, Jitter, FireOnStart}`.
 - `RunLoop(ctx, job, opts)`: sequential startup-plus-ticker loop; drains on cancellation.
 - `JitteredDelay(interval, fraction) time.Duration`: the pure ±band jitter core.
+- `Stamp`, `NewStamp(path)`, `.Record(ok bool) error`, `.Last() (RunRecord, bool)`, `.Due(interval, now, policy) bool`: the restart-surviving last-run record behind a conditional `FireOnStart`.
+- `RunRecord`: `{Time, OK}`, one completed scheduled run.
+- `FailurePolicy`: `RetryFailed` (a failed run leaves the schedule stale; the startup fire retries it), `CountFailed` (any completed run holds its slot; the ticker owns the retry).
 - `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`, `ReadHolder(path) (time.Time, bool)`.
 - `Exclusive`, `NewExclusive(dir, logger, opts...)`, `.Run(job) (Outcome, error)` (queue mode), `.RunOrSkip(job) (Outcome, error)` (skip mode), `.Pending() (int, error)`: cross-process run coalescing.
 - `WithQueueCapacity(n)`, `WithGate(func() bool)`: Exclusive options for queue depth (default 1) and a pre-run shutdown gate.

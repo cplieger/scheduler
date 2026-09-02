@@ -27,7 +27,8 @@ type LoopOptions struct {
 	Jitter float64
 	// FireOnStart runs the job immediately as the first iteration, before the
 	// first interval elapses, so a freshly-deployed container does work at once
-	// instead of waiting a full interval.
+	// instead of waiting a full interval. Compute it from Stamp.Due to skip
+	// the startup fire when a recent run's record survived a restart.
 	FireOnStart bool
 }
 
