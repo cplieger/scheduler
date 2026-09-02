@@ -233,3 +233,65 @@ func TestStampDueUnknownPolicyPanics(t *testing.T) {
 	// programmer error surfaces at first boot, not after the first Record.
 	NewStamp(stampPath(t)).Due(time.Hour, time.Now(), FailurePolicy(42))
 }
+
+func TestStampRemaining(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	const interval = time.Hour
+
+	tests := []struct {
+		name    string
+		age     time.Duration
+		outcome string
+		policy  FailurePolicy
+		want    time.Duration
+		absent  bool
+	}{
+		{name: "absent", absent: true, policy: RetryFailed, want: 0},
+		{name: "fresh_ok_half_period", age: 30 * time.Minute, outcome: "ok", policy: RetryFailed, want: 30 * time.Minute},
+		{name: "stale_ok", age: 2 * time.Hour, outcome: "ok", policy: RetryFailed, want: 0},
+		{name: "boundary_age_equals_interval", age: interval, outcome: "ok", policy: RetryFailed, want: 0},
+		{name: "fresh_failed_retry_discounted", age: 30 * time.Minute, outcome: "failed", policy: RetryFailed, want: 0},
+		{name: "fresh_failed_count_holds_slot", age: 30 * time.Minute, outcome: "failed", policy: CountFailed, want: 30 * time.Minute},
+		{name: "future_ok_capped_at_interval", age: -30 * time.Minute, outcome: "ok", policy: RetryFailed, want: interval},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "last-run")
+			if !tc.absent {
+				seedStamp(t, path, now.Add(-tc.age), tc.outcome)
+			}
+			if got := NewStamp(path).Remaining(interval, now, tc.policy); got != tc.want {
+				t.Errorf("Remaining(%s, now, %d) with age=%s outcome=%q absent=%v = %s, want %s",
+					interval, tc.policy, tc.age, tc.outcome, tc.absent, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStampRemainingNonPositiveInterval(t *testing.T) {
+	t.Parallel()
+	path := stampPath(t)
+	now := time.Now()
+	seedStamp(t, path, now, "ok")
+	if got := NewStamp(path).Remaining(0, now, RetryFailed); got != 0 {
+		t.Errorf("Remaining(0, now, RetryFailed) with a fresh success = %s, want 0", got)
+	}
+	// The Due half of the invariant: a non-positive interval is always due,
+	// even for a future-dated record.
+	seedStamp(t, path, now.Add(30*time.Minute), "ok")
+	if !NewStamp(path).Due(0, now, RetryFailed) {
+		t.Error("Due(0, now, RetryFailed) with a future record = false, want true")
+	}
+}
+
+func TestStampRemainingUnknownPolicyPanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Error("Remaining(unknown policy) did not panic")
+		}
+	}()
+	NewStamp(stampPath(t)).Remaining(time.Hour, time.Now(), FailurePolicy(42))
+}

@@ -15,8 +15,9 @@
 //     computes RunLoop's FireOnStart from Stamp.Due, so a container recreated
 //     minutes after a successful pass does not repeat it, under an explicit
 //     FailurePolicy (retry a failed run at startup, or leave the retry to the
-//     interval ticker). Which runs count and where the file lives stay
-//     app-side.
+//     interval ticker), and phases the first tick from the previous run via
+//     Stamp.Remaining and LoopOptions.FirstDelay. Which runs count and where
+//     the file lives stay app-side.
 //   - TryLock / Unlock / ReadHolder are an advisory flock(2) overlap guard so
 //     a run and an out-of-band trigger never execute two jobs at once (a
 //     trigger arriving mid-run is queued by Exclusive, below).
