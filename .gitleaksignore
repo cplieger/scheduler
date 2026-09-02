@@ -1,0 +1,9 @@
+# Historical test placeholder: the redaction sentinel "hunter2-api-key" in
+# interval_test.go:126 at commit f002677a, inside
+# TestParseIntervalRedactedValue — the value that test asserts is redacted
+# from interval-clamp log output. Not a credential.
+#
+# The full-history scan (gitleaks git, advisory) fingerprints per commit, so
+# it cannot honour a // gitleaks:allow added to the working tree afterwards.
+# Without this entry it re-mints a code-scanning alert on every run.
+f002677a99fa8bb199fc89472d729baf1d7df025:interval_test.go:generic-api-key:126
