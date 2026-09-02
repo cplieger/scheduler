@@ -135,6 +135,9 @@ due := stamp.Due(sched.Interval, time.Now(), scheduler.RetryFailed)
 scheduler.RunLoop(ctx, runPass, scheduler.LoopOptions{
 	Interval:    sched.Interval,
 	FireOnStart: due, // fire at boot only when no recent run survived the restart
+	// Phase the first tick from the previous run, not from boot: a run 30
+	// minutes old on a 1h interval means the next tick lands in 30 minutes.
+	FirstDelay: stamp.Remaining(sched.Interval, time.Now(), scheduler.RetryFailed),
 })
 ```
 
@@ -154,6 +157,12 @@ A missing, torn, or unreadable record reads as due, so the failure direction is
 an extra startup run, never a skipped schedule. Without a persisted volume the
 file never survives a recreate and behavior degrades to the unconditional
 startup fire.
+
+`Remaining` is `Due`'s phase companion: the time left in the current period
+(zero exactly when due, capped at one interval). Wired into
+`LoopOptions.FirstDelay` it schedules the next run one interval after the
+previous execution instead of one interval after boot, so restarts neither
+add runs nor delay the cadence.
 
 ### Overlap guard and coalescing
 
@@ -297,10 +306,10 @@ split as `SlotFile`.
 - `ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedule`.
 - `WithZeroAsOnce(zeroAsOnce bool)`, `WithBounds(low, high)`, `WithName(name)`, `WithIntervalLogger(l)`, `WithRedactedValue(redacted bool)`: interval options.
 - `Job`: `func(ctx context.Context)`, one unit of scheduled work.
-- `LoopOptions`: `{Interval, Jitter, FireOnStart}`.
+- `LoopOptions`: `{Interval, Jitter, FirstDelay, FireOnStart}`.
 - `RunLoop(ctx, job, opts)`: sequential startup-plus-ticker loop; drains on cancellation.
 - `JitteredDelay(interval, fraction) time.Duration`: the pure ±band jitter core.
-- `Stamp`, `NewStamp(path)`, `.Record(ok bool) error`, `.Last() (RunRecord, bool)`, `.Due(interval, now, policy) bool`: the restart-surviving last-run record behind a conditional `FireOnStart`.
+- `Stamp`, `NewStamp(path)`, `.Record(ok bool) error`, `.Last() (RunRecord, bool)`, `.Due(interval, now, policy) bool`, `.Remaining(interval, now, policy) time.Duration`: the restart-surviving last-run record behind a conditional, phase-preserving `FireOnStart`/`FirstDelay`.
 - `RunRecord`: `{Time, OK}`, one completed scheduled run.
 - `FailurePolicy`: `RetryFailed` (a failed run leaves the schedule stale; the startup fire retries it), `CountFailed` (any completed run holds its slot; the ticker owns the retry).
 - `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`, `ReadHolder(path) (time.Time, bool)`.

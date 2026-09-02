@@ -185,3 +185,71 @@ func TestJitteredDelayClampsFractionAboveOne(t *testing.T) {
 		}
 	})
 }
+
+func TestRunLoopFirstDelayShiftsTheFirstTick(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var fires atomic.Int32
+		done := make(chan struct{})
+		go func() {
+			RunLoop(ctx, func(context.Context) { fires.Add(1) },
+				LoopOptions{Interval: 10 * time.Millisecond, FirstDelay: 3 * time.Millisecond})
+			close(done)
+		}()
+		synctest.Sleep(75 * time.Millisecond)
+		cancel()
+		<-done
+
+		// FirstDelay phases the schedule: ticks land at 3ms, then every 10ms
+		// (13ms..73ms), so exactly 8 fire within the 75ms window where the
+		// default phase (10ms..70ms) would fire 7.
+		if got := fires.Load(); got != 8 {
+			t.Errorf("fires = %d, want exactly 8 (ticks at 3ms then 13ms..73ms within 75ms)", got)
+		}
+	})
+}
+
+func TestRunLoopFirstDelayNonPositiveMeansInterval(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var fires atomic.Int32
+		done := make(chan struct{})
+		go func() {
+			RunLoop(ctx, func(context.Context) { fires.Add(1) },
+				LoopOptions{Interval: 10 * time.Millisecond, FirstDelay: -time.Millisecond})
+			close(done)
+		}()
+		synctest.Sleep(75 * time.Millisecond)
+		cancel()
+		<-done
+
+		// The default phase: ticks at 10ms..70ms, exactly as with no FirstDelay.
+		if got := fires.Load(); got != 7 {
+			t.Errorf("fires = %d, want exactly 7 (non-positive FirstDelay keeps the interval phase)", got)
+		}
+	})
+}
+
+func TestRunLoopFireOnStartOverridesFirstDelay(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var fires atomic.Int32
+	// FireOnStart wins: the first run is immediate despite a long FirstDelay;
+	// the job cancels so the loop returns after that single run.
+	RunLoop(ctx, func(context.Context) {
+		fires.Add(1)
+		cancel()
+	}, LoopOptions{Interval: time.Hour, FirstDelay: 30 * time.Minute, FireOnStart: true})
+
+	if got := fires.Load(); got != 1 {
+		t.Errorf("fires = %d, want 1 (FireOnStart overrides FirstDelay)", got)
+	}
+}

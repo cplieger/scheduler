@@ -38,10 +38,15 @@ const (
 // succeeded, in a single file. Place the file on storage that outlives the
 // process (a persisted volume) and it survives a container recreate, which
 // lets a composition root skip RunLoop's startup fire when the previous
-// container ran recently:
+// container ran recently, and phase the first tick from that previous run:
 //
 //	due := stamp.Due(interval, time.Now(), scheduler.RetryFailed)
-//	scheduler.RunLoop(ctx, job, scheduler.LoopOptions{Interval: interval, FireOnStart: due})
+//	rem := stamp.Remaining(interval, time.Now(), scheduler.RetryFailed)
+//	scheduler.RunLoop(ctx, job, scheduler.LoopOptions{
+//		Interval:    interval,
+//		FireOnStart: due,
+//		FirstDelay:  rem,
+//	})
 //
 // Which runs get recorded is the caller's policy: a full scheduled pass
 // counts, while a manually triggered or scoped run typically does not,
@@ -112,6 +117,21 @@ func (s *Stamp) Last() (rec RunRecord, known bool) {
 	}
 }
 
+// qualifying returns the record Due and Remaining judge, applying the policy:
+// an unknown record never qualifies, and RetryFailed discounts a failure. It
+// panics on a FailurePolicy outside the declared constants — a programmer
+// error, caught at first boot.
+func (s *Stamp) qualifying(policy FailurePolicy) (RunRecord, bool) {
+	if policy != RetryFailed && policy != CountFailed {
+		panic(fmt.Sprintf("scheduler: unknown FailurePolicy %d", policy))
+	}
+	rec, known := s.Last()
+	if !known || (policy == RetryFailed && !rec.OK) {
+		return RunRecord{}, false
+	}
+	return rec, true
+}
+
 // Due reports whether a startup run is due: no run is known, or the policy
 // discounts the last one, or it completed at least interval ago. now is a
 // parameter so the caller and its tests share one clock. A record dated in
@@ -120,15 +140,41 @@ func (s *Stamp) Last() (rec RunRecord, known bool) {
 // always due. Due panics on a FailurePolicy outside the declared constants —
 // a programmer error, caught at first boot.
 func (s *Stamp) Due(interval time.Duration, now time.Time, policy FailurePolicy) bool {
-	if policy != RetryFailed && policy != CountFailed {
-		panic(fmt.Sprintf("scheduler: Due called with unknown FailurePolicy %d", policy))
-	}
-	rec, known := s.Last()
-	if !known {
-		return true
-	}
-	if policy == RetryFailed && !rec.OK {
+	rec, ok := s.qualifying(policy)
+	if !ok || interval <= 0 {
 		return true
 	}
 	return now.Sub(rec.Time) >= interval
+}
+
+// Remaining reports the time left until the next run is due: interval minus
+// the qualifying record's age, floored at zero and capped at interval (a
+// future-dated record counts as one full period). Remaining is zero exactly
+// when Due is true, so one call pair drives both boot decisions — the
+// startup fire and the first tick's phase:
+//
+//	due := stamp.Due(interval, now, scheduler.RetryFailed)
+//	scheduler.RunLoop(ctx, job, scheduler.LoopOptions{
+//		Interval:    interval,
+//		FireOnStart: due,
+//		FirstDelay:  stamp.Remaining(interval, now, scheduler.RetryFailed),
+//	})
+//
+// The next run then lands one interval after the recorded previous run
+// instead of one interval after boot. Panics on an unknown FailurePolicy,
+// like Due.
+func (s *Stamp) Remaining(interval time.Duration, now time.Time, policy FailurePolicy) time.Duration {
+	rec, ok := s.qualifying(policy)
+	if !ok || interval <= 0 {
+		return 0
+	}
+	rem := interval - now.Sub(rec.Time)
+	switch {
+	case rem <= 0:
+		return 0
+	case rem > interval:
+		return interval
+	default:
+		return rem
+	}
 }

@@ -25,6 +25,12 @@ type LoopOptions struct {
 	// shared upstream. It is a fraction in [0, 1); 0 disables jitter. The
 	// startup fire is never jittered.
 	Jitter float64
+	// FirstDelay overrides the delay before the first tick, so a schedule's
+	// phase survives a restart: pass Stamp.Remaining and the next run lands
+	// one interval after the recorded previous run instead of one interval
+	// after boot. Non-positive means Interval, the default; the value is
+	// never jittered. Ignored when FireOnStart is true.
+	FirstDelay time.Duration
 	// FireOnStart runs the job immediately as the first iteration, before the
 	// first interval elapses, so a freshly-deployed container does work at once
 	// instead of waiting a full interval. Compute it from Stamp.Due to skip
@@ -47,6 +53,9 @@ func RunLoop(ctx context.Context, job Job, opts LoopOptions) {
 	}
 
 	delay := JitteredDelay(opts.Interval, opts.Jitter)
+	if opts.FirstDelay > 0 {
+		delay = opts.FirstDelay
+	}
 	if opts.FireOnStart {
 		delay = 0
 	}
