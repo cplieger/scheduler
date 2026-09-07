@@ -42,14 +42,12 @@ type LoopOptions struct {
 }
 
 // RunLoop runs job on a schedule until ctx is cancelled. The job runs
-// sequentially in the loop, so two invocations never overlap in-process; guard
-// cross-process overlap (an external trigger racing the loop) with TryLock
-// inside the job. RunLoop blocks until ctx is cancelled and the in-flight job
-// (if any) returns, so a caller can treat its return as a completed drain.
-//
-// RunLoop covers the built-in scheduling mode only. A one-shot (ModeOnce) job
-// is run directly by the caller; an idle (ModeExternal) container simply waits
-// on ctx.Done. RunLoop returns immediately if Interval is not positive.
+// sequentially, so two invocations never overlap in-process; guard cross-process
+// overlap with TryLock inside the job. RunLoop blocks until ctx is cancelled and
+// the in-flight job returns, so a caller can treat its return as a completed
+// drain. It covers the built-in scheduling mode only — a ModeOnce job is run
+// directly by the caller and a ModeExternal container waits on ctx.Done — and
+// returns immediately if Interval is not positive.
 func RunLoop(ctx context.Context, job Job, opts LoopOptions) {
 	if opts.Interval <= 0 {
 		return

@@ -6,14 +6,7 @@ import (
 	"time"
 )
 
-// --- Run queue ---
-//
-// The daemon is the single owner of job execution: every trigger — the
-// built-in ticker and each socket client — submits a Job here, and one
-// executor goroutine serves them strictly in order. FIFO with no coalescing:
-// every accepted request gets its own run and its own true result (a queued
-// trigger's payload replays exactly; nothing is merged, deferred, or replayed
-// with the wrong arguments). The shape assumes idempotent runs, so a
+// The queue assumes idempotent runs: nothing is merged or deduplicated, so a
 // back-to-back duplicate from a trigger burst costs only time.
 
 // Queue rejection errors. Their messages travel the wire verbatim as the

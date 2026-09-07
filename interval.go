@@ -97,16 +97,13 @@ func WithName(name string) IntervalOption {
 }
 
 // WithRedactedValue selects whether ParseInterval's warnings echo the raw
-// interval value: true keeps it out, making them field-name-only, while false
-// keeps the default echo, exactly as if the option were absent. Repeated
-// applications resolve last-wins. Pass true when the value passes through
-// secret-capable config expansion (a YAML file with ${VAR} references): a
-// config typo can place an expanded secret in the interval field, and the
-// default unparseable-value warning would echo it to the startup log. Only the
-// unparseable warning can ever carry such a value — a negative or clamped
-// value necessarily parsed as a duration — but with true every warning
-// omits the supplied value (the clamp warning keeps the resulting bound), so
-// the redaction contract is uniform rather than per-branch.
+// interval value: true keeps it out, making them field-name-only; false is the
+// default echo. Repeated applications resolve last-wins. Pass true when the
+// value passes through secret-capable config expansion (a YAML ${VAR}), where a
+// typo can place an expanded secret in the interval field and the unparseable
+// warning would ship it to the startup log. Only that warning can carry such a
+// value, but true omits the supplied value from every warning so the contract is
+// uniform rather than per-branch.
 func WithRedactedValue(redacted bool) IntervalOption {
 	return func(c *intervalConfig) { c.redactValue = redacted }
 }
@@ -129,17 +126,10 @@ func WithIntervalLogger(l *slog.Logger) IntervalOption {
 //     falling back to the default cadence beats silently disabling the job)
 //   - anything unparseable -> def, ModeBuiltin, with a warning
 //
-// def is the fallback cadence used for every non-positive outcome; it is also
-// carried on the returned Schedule in the external and once modes for
-// reference. def must be positive and ParseInterval panics otherwise (a
-// programmer error in the composition root, caught at first boot — the same
-// contract as time.NewTicker): def becomes the Interval of every ModeBuiltin
-// result (empty, negative, or unparseable input), and the library's invariant
-// that a ModeBuiltin Schedule always carries a positive Interval -- which a
-// consumer relies on when it passes the Interval straight to time.NewTicker --
-// holds only when def > 0. (RunLoop itself also guards defensively, since a
-// hand-built LoopOptions can carry any Interval.) Warnings are logged via
-// slog.Default() unless WithIntervalLogger is set.
+// def is the fallback for every non-positive outcome and must be positive;
+// ParseInterval panics otherwise, because def becomes the Interval of every
+// ModeBuiltin result and a consumer passes that straight to time.NewTicker.
+// Warnings go to slog.Default() unless WithIntervalLogger is set.
 func ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedule {
 	if def <= 0 {
 		panic("scheduler: ParseInterval def must be positive")
@@ -213,20 +203,14 @@ func (c *intervalConfig) clamp(d time.Duration) time.Duration {
 	return clamped
 }
 
-// lowerASCII lowercases the ASCII letters in s and leaves every other byte
-// unchanged. It returns s itself when there is nothing to fold, so the common
-// already-lowercase value costs no allocation.
-//
-// strings.ToLower is deliberately NOT used to match the sentinels. Unicode
-// simple case folding maps two already-assigned runes onto ASCII letters —
-// U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE) to 'i' and U+212A (KELVIN
-// SIGN) to 'k' — so "dİsabled" folds onto the "disabled" sentinel and selects
-// ModeExternal. That is the one wrong answer this function can give: the
-// documented contract for a value that is not a sentinel and not a duration is
-// the default interval plus a warning, and silently choosing ModeExternal
-// instead disables the schedule with no log line at all. Folding ASCII only
-// sends such a value down the ParseDuration path, where it fails and warns.
-// The sentinels are ASCII, so restricting the fold cannot lose a real match.
+// lowerASCII lowercases the ASCII letters in s, returning s itself when there is
+// nothing to fold. strings.ToLower is deliberately NOT used: Unicode simple case
+// folding maps U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE) onto 'i' and
+// U+212A (KELVIN SIGN) onto 'k', so "dİsabled" would fold onto the "disabled"
+// sentinel and silently select ModeExternal — disabling the schedule with no log
+// line, where the documented answer for a non-sentinel non-duration value is the
+// default interval plus a warning. The sentinels are ASCII, so restricting the
+// fold cannot lose a real match.
 func lowerASCII(s string) string {
 	var b []byte
 	for i := range len(s) {

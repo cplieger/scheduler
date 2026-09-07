@@ -1,14 +1,9 @@
 package trigger
 
-// --- Wire protocol (client <-> daemon, newline-delimited JSON) ---
-//
-// A connection carries one request and its lifecycle: the client sends a
-// single JSON-encoded payload line, then reads Event lines until the final
-// done. Client and daemon ship in the same binary inside the same image, so
-// there is no version skew to negotiate and the wire format carries no
-// version field. The request line is the payload type P encoded directly: an
-// argless daemon's empty payload struct frames as `{}`, and fields added to a
-// payload later must stay optional so an older client's frame keeps decoding.
+// A connection carries one request and its lifecycle: the client sends a single
+// JSON-encoded payload line, then reads Event lines until the final done. A
+// field added to a payload later must stay optional, or an older client's frame
+// stops decoding.
 
 // Event is one status line the daemon streams back. The client receives
 // EventQueued on acceptance, EventStarted when the executor picks the request

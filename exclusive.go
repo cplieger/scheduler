@@ -121,34 +121,14 @@ func WithGate(gate func() bool) ExclusiveOption {
 	return func(e *Exclusive) { e.gate = gate }
 }
 
-// Exclusive coordinates cycle runs across processes so that at most one runs
-// at a time, with a small queue of pending rerun requests instead of blocked
-// waiters — packaged cross-process run coalescing for callers that are
-// themselves short-lived processes (a poll subcommand exec'd by an operator or
-// an external scheduler racing the resident daemon).
-//
-// The mechanics: a runner holds a flock(2) on dir/cycle.lock for the whole
-// job; a requester that finds the lock busy increments the counter in
-// dir/cycle.queued and exits immediately (never blocking for the job's
-// duration); the runner consumes the counter at job end, rerunning once per
-// queued request until none remain. Because the lock is an flock, the kernel
-// releases it when the holding process dies — there is no stale-lock state —
-// and a queue counter orphaned by a crash is cleared at the next acquisition
-// (the run about to start satisfies the demand it recorded).
-//
-// A holder executes at most maxCoalescedReruns (8) queued reruns per
-// acquisition; demand still pending past that cap is deferred — it stays in
-// the counter file and the next acquisition's run satisfies it — so a
-// relentless trigger source cannot pin one holder indefinitely. WithGate
-// bounds the holder further: it stops runs from starting once the
-// composition root's shutdown signal trips. Deferral is always
-// demand-preserving.
-//
-// Both files live in dir and are created on first use; they are never
-// deleted (clearing the queue writes a zero count — unlinking a locked file
-// would let a concurrent opener land on a different inode and break mutual
-// exclusion). Place dir where untrusted local users cannot write, per the
-// same symlink-following caveat as TryLock.
+// Exclusive coordinates cycle runs across processes so at most one runs at a
+// time, queueing pending rerun requests rather than blocking waiters. A runner
+// holds an flock(2) on dir/cycle.lock for the whole job, so the kernel releases
+// it if the holder dies and there is no stale-lock state; a requester finding it
+// busy records demand in dir/cycle.queued and exits. Both files are created on
+// first use and never deleted — unlinking a locked file would let a concurrent
+// opener land on a different inode and break mutual exclusion. Place dir where
+// untrusted local users cannot write, per TryLock's symlink caveat.
 type Exclusive struct {
 	logger   *slog.Logger
 	gate     func() bool
@@ -191,33 +171,14 @@ func (e *Exclusive) log() *slog.Logger {
 func (e *Exclusive) lockPath() string  { return filepath.Join(e.dir, ExclusiveLockName) }
 func (e *Exclusive) queuePath() string { return filepath.Join(e.dir, ExclusiveQueueName) }
 
-// Run executes job under the cycle lock, queueing the request if a run is
-// already in flight (queue mode — for demand-driven callers such as a poll
-// subcommand, where the caller's request must be satisfied by a run that
-// starts after it arrived).
-//
-//   - Lock free: run the job now, then execute any rerun requests queued
-//     during it (OutcomeRan, or OutcomeRanQueued if reruns happened).
-//   - Lock busy, queue below capacity: record a rerun request and return
-//     immediately (OutcomeQueued) — the active runner executes it when the
-//     current run finishes. The requester never blocks for the job's duration.
-//   - Lock busy, queue full: drop the request (OutcomeDiscarded) — the queued
-//     rerun(s) already guarantee a run starts after this request arrived.
-//
-// The returned error carries the job's own error(s) when it ran (joined
-// across reruns), or the infrastructure error that prevented the request from
-// being recorded (OutcomeNone). OutcomeQueued may also accompany an error:
-// the request was recorded but the post-enqueue re-probe failed — the demand
-// stands, and a current or next runner consumes it. Queued and Discarded
-// outcomes are success for the requesting process: log-and-exit-0 is the
-// intended caller behavior.
-//
-// A failed run does not stop queued demand: each queued request is owed a
-// run that starts after it arrived, succeed or fail, so the consume loop
-// continues through job errors (bounded by the rerun cap). WithGate stops
-// runs from STARTING once the composition root's shutdown (or other) signal
-// trips: a gated initial run returns OutcomeGated, and demand queued behind
-// a closed gate waits for the next run.
+// Run executes job under the cycle lock, queueing the request when a run is
+// already in flight — queue mode, for a demand-driven caller whose request must
+// be satisfied by a run that starts after it arrived. Each Outcome constant
+// documents when it is returned; Queued and Discarded are success for the
+// requesting process, so log-and-exit-0 is the intended behavior. The error is
+// the job's own, joined across reruns, or the infrastructure error that stopped
+// the request being recorded. A failed run does not stop queued demand: every
+// queued request is owed a run, succeed or fail, bounded by the rerun cap.
 func (e *Exclusive) Run(job func() error) (Outcome, error) {
 	lock, ok, err := TryLock(e.lockPath())
 	if err != nil {
@@ -259,18 +220,12 @@ func (e *Exclusive) Run(job func() error) (Outcome, error) {
 	return e.runHolding(relock, acquireReprobe, job)
 }
 
-// RunOrSkip executes job under the cycle lock, skipping when a run is already
-// in flight (skip mode — for time-driven callers such as a RunLoop tick, where
-// the next tick provides freshness and queueing would only pile on the process
-// already doing the work):
-//
-//	scheduler.RunLoop(ctx, func(ctx context.Context) {
-//		_, _ = ex.RunOrSkip(func() error { return runCycle(ctx) })
-//	}, opts)
-//
-// A skipped tick logs a warning (the job is overrunning its interval) and
-// returns (OutcomeSkipped, nil). When the lock is free it behaves exactly like
-// Run's acquired path, including executing queued rerun requests at job end.
+// RunOrSkip executes job under the cycle lock, skipping when a run is already in
+// flight — skip mode, for a time-driven caller such as a RunLoop tick, where the
+// next tick provides freshness and queueing would only pile onto the process
+// already doing the work. A skipped tick logs a warning (the job is overrunning
+// its interval) and returns OutcomeSkipped. When the lock is free it behaves
+// exactly like Run's acquired path, queued reruns included.
 func (e *Exclusive) RunOrSkip(job func() error) (Outcome, error) {
 	lock, ok, err := TryLock(e.lockPath())
 	if err != nil {
@@ -294,34 +249,25 @@ func (e *Exclusive) Pending() (int, error) {
 type acquireKind int
 
 const (
-	// acquireFresh: a normal acquisition (the lock was free on first probe).
-	// Any pre-existing queued count is demand orphaned by a crash or by a
-	// requester losing the post-release race; the run about to start satisfies
-	// it, so it is cleared without extra runs, with a warning.
+	// acquireFresh: the lock was free on first probe. Any pre-existing queued
+	// count is demand orphaned by a crash or a lost post-release race, which the
+	// run about to start satisfies, so it is cleared with a warning.
 	acquireFresh acquireKind = iota
-	// acquireReprobe: a requester enqueued its own request and then won the
-	// lock on the re-probe. Its queue entry is consumed silently — the run
-	// about to start IS that request.
+	// acquireReprobe: the requester enqueued, then won the lock on the re-probe.
+	// Its entry is consumed silently — the run about to start IS that request.
 	acquireReprobe
-	// acquireHandoff: the runner released the lock, then noticed a request
-	// that slipped in behind its final consume check and re-acquired. The
-	// entry is consumed as a live queued rerun (logged as such).
+	// acquireHandoff: the runner released, noticed a request that slipped in
+	// behind its final consume check, and re-acquired. Consumed as a live rerun.
 	acquireHandoff
 )
 
-// runHolding drives the holder side: the acquisition step on the queue
-// counter, the first job run, the consume loop (one rerun per queued request),
-// release, and the post-release re-check that closes the enqueue-after-final-
-// check race. lock must be held; runHolding releases it. Job errors and any
-// queue infrastructure errors are joined into the returned error; the Outcome
-// reflects what actually ran regardless.
-//
-// A shared rerun budget (maxCoalescedReruns) spans the whole call: every run
-// executed for queued demand — a consume-loop rerun or a post-release handoff
-// — draws it down, and an exhausted budget retires the holder instead of
-// re-acquiring, deferring whatever demand remains to the next run. The gate
-// (WithGate) is consulted before the initial run and again before every
-// rerun/handoff.
+// runHolding drives the holder side: the acquisition step on the queue counter,
+// the first run, the consume loop (one rerun per queued request), release, and
+// the post-release re-check closing the enqueue-after-final-check race. lock
+// must be held; runHolding releases it. A shared rerun budget spans the whole
+// call, so an exhausted budget retires the holder rather than re-acquiring,
+// deferring the remaining demand to the next run. Errors are joined; the
+// Outcome reflects what actually ran regardless.
 func (e *Exclusive) runHolding(lock *Lock, kind acquireKind, job func() error) (Outcome, error) {
 	if !e.gateOpen() {
 		lock.Unlock()

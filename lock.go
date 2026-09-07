@@ -20,17 +20,13 @@ type Lock struct {
 }
 
 // TryLock attempts a non-blocking exclusive lock on path, creating the file if
-// absent. ok is false without error when another holder currently owns the
-// lock (a run is already in flight); the caller must release an acquired lock
-// with Unlock. On acquisition it records the current time in the file so a
-// later contender can read the holder's age via ReadHolder.
-//
-// Place path in a directory not writable by untrusted local users (e.g. a
-// container-private /tmp or a service-owned dir, not a world-writable host
-// /tmp shared with other accounts): the file is opened following symlinks and
-// its holder timestamp is written with Truncate, so a pre-planted symlink at
-// path would be clobbered. Callers that must harden further can place path
-// under a 0700 service-owned directory.
+// absent. ok is false without error when another holder currently owns the lock;
+// the caller must release an acquired lock with Unlock. On acquisition it records
+// the current time in the file so a later contender can read the holder's age via
+// ReadHolder. Place path where untrusted local users cannot write — a
+// container-private or service-owned directory, not a shared host /tmp: the file
+// is opened following symlinks and its timestamp written with Truncate, so a
+// pre-planted symlink at path would be clobbered.
 func TryLock(path string) (l *Lock, ok bool, err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644) // #nosec G304 G703 -- caller-supplied trusted lock path
 	if err != nil {
