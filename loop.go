@@ -11,6 +11,9 @@ import (
 // past a shutdown signal should derive its own context (context.WithoutCancel)
 // internally. A Job reports its outcome through its own closure (setting a
 // health marker, logging); RunLoop does not inspect a return value.
+//
+// A panic in a Job is NOT recovered: it unwinds through RunLoop and terminates
+// the process, so record a cycle's outcome before the work that can panic.
 type Job func(ctx context.Context)
 
 // LoopOptions configures RunLoop. Interval must be positive; Jitter and
