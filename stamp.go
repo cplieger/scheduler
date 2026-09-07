@@ -21,46 +21,24 @@ type RunRecord struct {
 type FailurePolicy int
 
 const (
-	// RetryFailed treats a failed run as leaving the schedule stale: Due
-	// reports true unless the last recorded run both succeeded and is younger
-	// than the interval. A restart after a failure fires the startup run
-	// again, so an operator who fixes a bad configuration and recreates the
-	// container gets immediate feedback instead of waiting out an interval.
+	// RetryFailed treats a failed run as leaving the schedule stale, so a
+	// restart after a failure fires the startup run again: an operator who
+	// fixes a bad configuration and recreates the container gets immediate
+	// feedback.
 	RetryFailed FailurePolicy = iota
-	// CountFailed treats any completed run as holding its schedule slot: only
-	// the record's age decides Due, and the interval ticker owns the retry
-	// after a failure. For jobs whose failed passes are themselves expensive
-	// enough that a restart must not repeat them early.
+	// CountFailed treats any completed run as holding its slot, leaving the
+	// retry to the interval ticker. For jobs whose failed passes are
+	// themselves expensive enough that a restart must not repeat them early.
 	CountFailed
 )
 
 // Stamp records when a scheduled run last completed, and whether it
-// succeeded, in a single file. Place the file on storage that outlives the
-// process (a persisted volume) and it survives a container recreate, which
-// lets a composition root skip RunLoop's startup fire when the previous
-// container ran recently, and phase the first tick from that previous run:
-//
-//	due := stamp.Due(interval, time.Now(), scheduler.RetryFailed)
-//	rem := stamp.Remaining(interval, time.Now(), scheduler.RetryFailed)
-//	scheduler.RunLoop(ctx, job, scheduler.LoopOptions{
-//		Interval:    interval,
-//		FireOnStart: due,
-//		FirstDelay:  rem,
-//	})
-//
-// Which runs get recorded is the caller's policy: a full scheduled pass
-// counts, while a manually triggered or scoped run typically does not,
-// because it does not answer the freshness question a startup fire exists
-// for. Where the file lives is also the caller's: on storage that does not
-// persist, the file never survives a recreate and Due degrades to always
-// true, the unconditional startup fire.
-//
-// One process writes the stamp (the owner of the schedule); Record neither
-// locks nor fsyncs. A record lost to a crash, or torn by one, reads as
-// unknown, and unknown reads as due, so corruption costs at most one extra
-// startup run. Like a TryLock lock file, place the stamp in a directory not
-// writable by untrusted local users: it is created following symlinks and
-// replaced in place.
+// succeeded, in a single file. On storage that outlives the process it lets a
+// composition root skip RunLoop's startup fire and phase the first tick from
+// the previous run; see ExampleStamp. A record lost or torn by a crash reads
+// as unknown, and unknown reads as due, so corruption costs one extra startup
+// run and never a skipped schedule. Keep the file where untrusted local users
+// cannot write: it is created following symlinks and replaced in place.
 type Stamp struct {
 	path string
 }
@@ -72,9 +50,7 @@ func NewStamp(path string) *Stamp {
 }
 
 // Record replaces the stamp with the current time and ok as the last
-// completed run. Plain truncate-and-write: no lock (single writer by
-// contract) and no fsync, because losing a record to a crash is fail-safe —
-// an unknown record reads as due.
+// completed run. Single writer by contract: no lock, no fsync.
 func (s *Stamp) Record(ok bool) error {
 	outcome := "failed"
 	if ok {
@@ -85,8 +61,8 @@ func (s *Stamp) Record(ok bool) error {
 }
 
 // Last reads the most recent record. known is false when no run was ever
-// recorded, the file is unreadable, or the record is torn or malformed — the
-// conservative reading, since a consumer treats an unknown record as due.
+// recorded, or the record is unreadable, torn or malformed — all of which a
+// consumer treats as due.
 func (s *Stamp) Last() (rec RunRecord, known bool) {
 	f, err := os.Open(s.path) // #nosec G304 -- caller-supplied trusted stamp path
 	if err != nil {
@@ -117,10 +93,9 @@ func (s *Stamp) Last() (rec RunRecord, known bool) {
 	}
 }
 
-// qualifying returns the record Due and Remaining judge, applying the policy:
-// an unknown record never qualifies, and RetryFailed discounts a failure. It
-// panics on a FailurePolicy outside the declared constants — a programmer
-// error, caught at first boot.
+// qualifying returns the record Due and Remaining judge: an unknown record
+// never qualifies, and RetryFailed discounts a failure. Panics on a
+// FailurePolicy outside the declared constants.
 func (s *Stamp) qualifying(policy FailurePolicy) (RunRecord, bool) {
 	if policy != RetryFailed && policy != CountFailed {
 		panic(fmt.Sprintf("scheduler: unknown FailurePolicy %d", policy))
@@ -132,13 +107,11 @@ func (s *Stamp) qualifying(policy FailurePolicy) (RunRecord, bool) {
 	return rec, true
 }
 
-// Due reports whether a startup run is due: no run is known, or the policy
-// discounts the last one, or it completed at least interval ago. now is a
-// parameter so the caller and its tests share one clock. A record dated in
-// the future (a restored volume, a stepped clock) reads as not due until now
-// catches up, bounded by the next interval tick; a non-positive interval is
-// always due. Due panics on a FailurePolicy outside the declared constants —
-// a programmer error, caught at first boot.
+// Due reports whether a startup run is due: no run qualifies under policy, or
+// the last one completed at least interval ago. now is a parameter so caller
+// and tests share one clock. A future-dated record (a restored volume, a
+// stepped clock) reads as not due until now catches up; a non-positive
+// interval is always due. Panics on an unknown FailurePolicy.
 func (s *Stamp) Due(interval time.Duration, now time.Time, policy FailurePolicy) bool {
 	rec, ok := s.qualifying(policy)
 	if !ok || interval <= 0 {
@@ -148,21 +121,10 @@ func (s *Stamp) Due(interval time.Duration, now time.Time, policy FailurePolicy)
 }
 
 // Remaining reports the time left until the next run is due: interval minus
-// the qualifying record's age, floored at zero and capped at interval (a
-// future-dated record counts as one full period). Remaining is zero exactly
-// when Due is true, so one call pair drives both boot decisions — the
-// startup fire and the first tick's phase:
-//
-//	due := stamp.Due(interval, now, scheduler.RetryFailed)
-//	scheduler.RunLoop(ctx, job, scheduler.LoopOptions{
-//		Interval:    interval,
-//		FireOnStart: due,
-//		FirstDelay:  stamp.Remaining(interval, now, scheduler.RetryFailed),
-//	})
-//
-// The next run then lands one interval after the recorded previous run
-// instead of one interval after boot. Panics on an unknown FailurePolicy,
-// like Due.
+// the qualifying record's age, floored at zero and capped at interval, so a
+// future-dated record costs one full period at most. Remaining is zero exactly
+// when Due is true, which is what lets one pair of calls drive both the startup
+// fire and the first tick's phase. Panics like Due.
 func (s *Stamp) Remaining(interval time.Duration, now time.Time, policy FailurePolicy) time.Duration {
 	rec, ok := s.qualifying(policy)
 	if !ok || interval <= 0 {

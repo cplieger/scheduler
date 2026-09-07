@@ -13,26 +13,13 @@ import (
 const slotFileMaxBytes = 1 << 16
 
 // SlotFile is a single-slot byte payload shared across processes through one
-// file, mutated by atomic read-modify-write transactions under a short
-// exclusive flock(2) on the file itself. It is the storage mechanism behind
-// Exclusive's rerun counter, exported so an app can build its own coalescing
-// state on the same transaction — for example a payload-carrying demand slot
-// whose merge and claim semantics are app policy (docker-renovate-scheduler
-// records WHICH repos a queued trigger wants, not just that one arrived).
-//
-// The transaction is content-agnostic: what the bytes mean, how concurrent
-// demands merge, and when a slot counts as satisfied are the caller's parser
-// and policy. Parsers must self-heal on unparseable content (treat torn or
-// garbage bytes as the zero value): a crash between Truncate and WriteAt can
-// leave a torn slot, and the library's own counter and every other slot user
-// recover by reading garbage as empty.
-//
-// The slot file is created on first use and never unlinked — by the library
-// or the caller — while contenders may exist: unlinking a locked file lets a
-// concurrent opener land on a different inode and breaks mutual exclusion.
-// "Clear" is writing an empty payload. Place the path in a directory not
-// writable by untrusted local users, per the same symlink-following caveat as
-// TryLock.
+// file, mutated by read-modify-write transactions under a short exclusive
+// flock(2). It backs Exclusive's rerun counter, exported so an app can build
+// its own coalescing state on the same transaction. What the bytes mean is the
+// caller's policy, but a parser MUST read torn or garbage bytes as the zero
+// value: a crash between Truncate and WriteAt can tear the slot. Never unlink a
+// live slot — a concurrent opener would land on a different inode and lose
+// mutual exclusion; "clear" writes an empty payload. See TryLock on placement.
 type SlotFile struct {
 	path string
 }
@@ -43,18 +30,13 @@ func NewSlotFile(path string) *SlotFile {
 	return &SlotFile{path: path}
 }
 
-// Mutate applies fn to the slot's current content under an exclusive flock on
-// the slot file and returns the content fn saw. fn receives the current bytes
-// (empty on first use) and returns the bytes to store; returning content
-// byte-equal to before (returning before itself is the idiom) leaves the file
-// untouched, so a read is a Mutate whose fn returns its argument. A nil
-// return stores an empty payload (the clear idiom).
-//
-// The lock is blocking: contenders serialize, and the critical section is the
-// read, fn, and write of one short payload — microseconds, never a job's
-// duration — so keep fn small and non-blocking (it runs under the flock).
-// before stays meaningful alongside a non-nil error when the failure happened
-// after the read (a truncate or write error).
+// Mutate applies fn to the slot's current content under an exclusive flock and
+// returns the content fn saw. fn receives the current bytes (empty on first
+// use) and returns the bytes to store; returning them byte-equal leaves the
+// file untouched, so a read is a Mutate whose fn returns its argument, and a
+// nil return clears the slot. The lock is BLOCKING and fn runs under it, so
+// keep fn small and non-blocking. before stays meaningful beside a non-nil
+// error when the failure happened after the read.
 func (s *SlotFile) Mutate(fn func(before []byte) []byte) (before []byte, err error) {
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_RDWR, 0o644) // #nosec G304 -- caller-supplied trusted slot path
 	if err != nil {

@@ -12,33 +12,13 @@ import (
 const CancelledReason = "cancelled: scheduler shutting down"
 
 // Execute is the executor loop for the common daemon shape: it receives jobs
-// from q strictly in order and runs each through the run callback, owning the
-// Start/Finish lifecycle so the exactly-one-result contract is structural
-// rather than conventional — the callback returns the job's Outcome (timing
-// its own Duration) and cannot forget or double-deliver it. Mutual exclusion
-// is this loop: it is the queue's single receiver, so nothing else starts a
-// job.
-//
-// ctx is the daemon's shutdown context, and it governs admission, not the
-// in-flight run: a job received after ctx is done is finished with
-// CancelledReason without ever starting (the shutdown drain of already-queued
-// jobs), while a run already in flight sees the cancellation only through the
-// ctx passed to the callback and decides for itself. Execute blocks until
-// Close drains the queue, so a caller can treat its return as the executor's
-// drain.
-//
-// If the callback panics, the in-flight job's single result is still
-// delivered (OK false, the panic value as the Reason) before the panic
-// propagates, so a synchronously waiting client is never stranded by a
-// crashing daemon taking the socket down after the fact; the executor itself
-// still fails fast.
-//
-// Policy stays in the app, per the package contract: what the run does, how
-// outcomes map to health, and every log line live in the callback. A daemon
-// whose executor needs different mechanics — running jobs outside the
-// shutdown context (context.WithoutCancel), halting admission on an
-// app-specific state, a different cancellation vocabulary — keeps its
-// hand-written loop; Execute is opt-in.
+// from q strictly in order and runs each through run, owning the Start/Finish
+// lifecycle so the exactly-one-result contract is structural rather than
+// conventional. Mutual exclusion is this loop, the queue's single receiver.
+// ctx governs ADMISSION, not the in-flight run: a job received after ctx is
+// done finishes with CancelledReason without ever starting, while a run already
+// in flight sees cancellation only through the ctx passed to run. Execute blocks
+// until Close drains the queue, so its return IS the executor's drain.
 func Execute[P any](ctx context.Context, q *Queue[P], run func(ctx context.Context, trigger string, payload P) Outcome) {
 	for j := range q.Jobs() {
 		if ctx.Err() != nil {

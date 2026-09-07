@@ -38,21 +38,12 @@ var (
 
 // Submit performs one triggered run via the daemon at socketPath: it sends
 // payload as the request line, relays each intermediate lifecycle event to
-// onEvent (EventQueued, EventStarted; nil onEvent skips relaying; unknown
-// kinds are ignored for forward compatibility), and returns the final done
-// event. A non-nil error wraps ErrUnreachable, ErrSend, or ErrConnectionLost,
-// or is ctx's own error when the caller cancelled; the Event is only
-// meaningful when the error is nil.
-//
-// Submit blocks for the run's full queue-wait plus execution — triggered runs
-// are synchronous by contract (the trigger's exit code is the run's result),
-// so there is deliberately no read deadline on the event stream. ctx is how a
-// caller bounds that wait instead: cancelling it aborts the dial and closes
-// the connection under an in-flight read, so Submit returns context.Canceled
-// (or context.DeadlineExceeded) rather than blocking until the daemon
-// answers. A subcommand should pass signal.NotifyContext so an interactive
-// Ctrl-C unwinds and the daemon observes the disconnect, instead of the
-// process being killed with the connection half-open.
+// onEvent (nil skips relaying; unknown kinds are ignored for forward
+// compatibility), and returns the final done event. A non-nil error wraps
+// ErrUnreachable, ErrSend or ErrConnectionLost, or is ctx's own error; the Event
+// is meaningful only when the error is nil. Submit blocks for the run's full
+// queue-wait plus execution — triggered runs are synchronous by contract — so
+// there is deliberately no read deadline, and ctx is how a caller bounds it.
 func Submit[P any](ctx context.Context, socketPath string, payload P, onEvent func(Event)) (Event, error) {
 	dialer := net.Dialer{Timeout: DialTimeout}
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
@@ -74,26 +65,14 @@ func Submit[P any](ctx context.Context, socketPath string, payload P, onEvent fu
 	return awaitDone(ctx, json.NewDecoder(conn), onEvent)
 }
 
-// classify returns ctx's own error when the caller cancelled, and otherwise
-// wraps cause under the transport class it belongs to. All three of Submit's
-// failure arms go through here, because a cancelled operation reaches each of
-// them as an ordinary I/O error and the cause is what the caller needs: it
-// distinguishes "I gave up" from "the daemon died mid-run", which is the whole
-// point of publishing the classes separately.
-//
-// The two arms this exists for are not symmetric, and neither is fixable at the
-// call site. A cancelled DialContext error satisfies errors.Is for
-// context.Canceled AND for the class it gets wrapped in, so a caller testing
-// the transport sentinel first — the order this file's own doc lists them in —
-// diagnoses an operator's Ctrl-C as an unreachable daemon. A cancelled write
-// fails with net.ErrClosed, because cancellation reaches it by closing the
-// connection, so its chain carries no context error at all and NO errors.Is
-// test over the documented taxonomy can identify it. Reordering a consumer's
-// switch fixes the first and cannot reach the second.
-//
-// The race is accepted: a genuine failure landing in the same instant as a
-// cancellation is reported as the cancellation. The caller asked to stop, so
-// that is the more useful answer.
+// classify returns ctx's own error when the caller cancelled, and otherwise wraps
+// cause under its transport class, so a caller can tell "I gave up" from "the
+// daemon died mid-run". Both arms need it and neither is fixable at the call
+// site: a cancelled DialContext error satisfies errors.Is for context.Canceled
+// AND for its wrapping class, so a caller testing the transport sentinel first
+// misreads a Ctrl-C as an unreachable daemon; a cancelled write fails with
+// net.ErrClosed and carries no context error at all. A genuine failure landing in
+// the same instant as a cancellation is reported as the cancellation.
 func classify(ctx context.Context, class, cause error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr

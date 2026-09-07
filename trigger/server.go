@@ -44,28 +44,14 @@ const (
 // nobody uses and force a minor release for an implementation detail.
 var errAddrInUse = errors.New("socket already has a live listener")
 
-// Listen binds the unix socket at path with owner-only permissions.
-//
-// It binds FIRST and treats EADDRINUSE as a question rather than an obstacle,
-// because the kernel already supplies the single-instance guard this package's
-// consumers depend on: binding a path a live listener still owns fails, and
-// closing a listener unlinks its own path (both measured). So a leftover file
-// means a SIGKILLed predecessor — the only case an unlink is for.
-//
-// It used to unlink unconditionally before binding, under a comment reasoning
-// that an in-container /tmp is per-container, so the file could only be this
-// daemon's own previous life's. Every consumer's CLI falsifies that: a second
-// invocation in the same container reached this line, silently unlinked the
-// live socket, bound the path and served the next request, while the first
-// process — PID 1 — kept an unreferenced listener and said nothing. Measured:
-// unlink-then-bind really does steal a live socket, and the three socket-shaped
-// schedulers each publish an invariant that two passes can never overlap.
-//
-// On EADDRINUSE the path is DIALLED. Something answering proves a live owner,
-// so this returns errAddrInUse naming it; nothing answering proves the socket
-// is dead, so the file is unlinked and the bind retried exactly once. The retry
-// is not a loop: a second EADDRINUSE after a successful unlink means another
-// process bound it in between, which is the live-owner answer again.
+// Listen binds the unix socket at path with owner-only permissions. It binds
+// FIRST and treats EADDRINUSE as a question, because the kernel already supplies
+// the single-instance guard: binding a path a live listener owns fails, and
+// closing a listener unlinks its own path. Never unlink before binding — that
+// steals a LIVE socket from a running daemon, which then keeps serving an
+// unreferenced listener in silence. On EADDRINUSE the path is dialled: an answer
+// means a live owner (errAddrInUse), silence means a SIGKILLed predecessor, so
+// the file is unlinked and the bind retried once, never in a loop.
 func Listen(path string) (net.Listener, error) {
 	ln, err := bindOwnerOnly(path)
 	if err == nil || !errors.Is(err, syscall.EADDRINUSE) {
@@ -106,17 +92,14 @@ func dialProbe(path string) (net.Conn, error) {
 
 // bindOwnerOnly binds path and leaves it readable and writable by its owner only.
 func bindOwnerOnly(path string) (net.Listener, error) {
-	// Narrow the umask so the socket is born owner-only; the Chmod below is
-	// then belt-and-braces instead of closing a world-connectable window.
+	// Narrow the umask so the socket is born owner-only; the Chmod below is then
+	// belt-and-braces rather than closing a world-connectable window.
 	//
-	// The swap is PROCESS-WIDE, so this is safe only while nothing else in the
-	// process is creating files: a directory born inside this window is
-	// drw-------, and its unprivileged owner can then neither create entries in
-	// it nor unlink from it. Production callers satisfy that by calling Listen
-	// during single-threaded boot. A test suite does not get it for free — two
-	// parallel tests, one binding and one calling os.MkdirTemp, are enough to
-	// corrupt the second one's directory, and the failure is invisible under
-	// root because root bypasses the directory permission check.
+	// The swap is PROCESS-WIDE, so it is safe only while nothing else in the
+	// process creates files: a directory born inside this window is drw-------,
+	// and its owner can then neither create entries in it nor unlink from it.
+	// Callers satisfy that by calling Listen during single-threaded boot; a
+	// parallel test suite does not, and root bypasses the check so it hides.
 	oldMask := syscall.Umask(0o177)
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "unix", path)
