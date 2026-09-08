@@ -3,6 +3,7 @@ package trigger
 import (
 	"context"
 	"errors"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -110,12 +111,42 @@ func (h recordHandler) snapshot() []slog.Record {
 }
 
 // captureLogs swaps slog.Default for a capturing handler for the test's
-// duration. Tests using it must not run in parallel (process-global default).
+// duration and restores all three globals slog.SetDefault writes. Tests using
+// it must not run in parallel (process-global default). SetDefault also points
+// the log package at the installed handler and SKIPS that redirect for slog's
+// own default handler, so restoring slog alone leaves log writing into the
+// capture; slog goes back first, because reinstalling a non-default handler
+// re-runs the redirect.
 func captureLogs(t *testing.T) recordHandler {
 	t.Helper()
 	h := newRecordHandler()
-	prev := slog.Default()
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
 	return h
+}
+
+// TestCaptureLogs_restoresLogPackageGlobals pins the restore this package's log
+// assertions rest on: a leaked redirect silences every later slog call in the
+// binary, because the stock default handler emits through log.Output.
+func TestCaptureLogs_restoresLogPackageGlobals(t *testing.T) {
+	wantWriter, wantFlags := log.Writer(), log.Flags()
+
+	t.Run("capture", func(t *testing.T) {
+		captureLogs(t)
+		if log.Writer() == wantWriter {
+			t.Fatal("slog.SetDefault did not redirect log's writer, so this test cannot observe the restore")
+		}
+	})
+
+	if log.Writer() != wantWriter {
+		t.Error("log.Writer() not restored; later slog calls write into the capturing handler")
+	}
+	if got := log.Flags(); got != wantFlags {
+		t.Errorf("log.Flags() = %d, want %d", got, wantFlags)
+	}
 }
