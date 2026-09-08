@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -680,9 +681,17 @@ func TestExclusiveReportsPostRunQueueError(t *testing.T) {
 // slog.Default() globally, so it must NOT call t.Parallel().
 func TestExclusiveNilLoggerUsesDefault(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
+	// SetDefault also points the log package at the installed handler and SKIPS
+	// that redirect for slog's own default handler, so restoring slog alone
+	// leaves log writing into buf; slog goes back first, because reinstalling a
+	// non-default handler re-runs the redirect.
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	defer slog.SetDefault(prev)
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
 
 	dir := t.TempDir()
 	holder, ok, err := TryLock(filepath.Join(dir, ExclusiveLockName))
