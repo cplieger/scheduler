@@ -623,3 +623,120 @@ func TestListen_StaleSocketIsUnlinkedNotRefused(t *testing.T) {
 		t.Error("a stale socket must not be reported as a live owner")
 	}
 }
+
+// waitForDebug polls the captured records until one at DEBUG contains want.
+// A deadline-bounded poll rather than a sleep-to-wait: the connection is
+// served on the server's own goroutine, so the record is the only thing the
+// test can synchronize on, and a miss fails closed naming what it did see.
+func waitForDebug(t *testing.T, rec recordHandler, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var seen []string
+		for _, r := range rec.snapshot() {
+			if r.Level == slog.LevelDebug && strings.Contains(r.Message, want) {
+				return
+			}
+			seen = append(seen, r.Level.String()+" "+r.Message)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no DEBUG record containing %q within 5s; records = %v", want, seen)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestServer_ConnectionThatSendsNoRequestIsNotWarnedAbout pins the level this
+// package owes its OWN probe. Listen dials a contested path to tell a live
+// owner from a SIGKILLed predecessor's file and closes without writing, so the
+// live daemon accepts a connection carrying no request; warning about it puts a
+// WARN in a healthy daemon's log every time a second owner is correctly
+// refused. Nothing was asked for and nothing was lost, so the record is DEBUG
+// and the app's hooks never see it.
+// Not parallel: captureLogs swaps the process-wide slog default, and Listen
+// changes the process-wide umask.
+func TestServer_ConnectionThatSendsNoRequestIsNotWarnedAbout(t *testing.T) {
+	rec := captureLogs(t)
+	sock := testSocketPath(t)
+	q := NewQueue[testPayload](16)
+	execDone := startExecutor(q, runOK)
+	ln, err := Listen(sock)
+	if err != nil {
+		t.Fatalf("Listen() = %v", err)
+	}
+	var mu sync.Mutex
+	var accepted, rejected int
+	srv := &Server[testPayload]{
+		Queue:      q,
+		OnAccepted: func(testPayload) { mu.Lock(); accepted++; mu.Unlock() },
+		OnRejected: func(testPayload, error) { mu.Lock(); rejected++; mu.Unlock() },
+	}
+	srv.Serve(ln)
+	t.Cleanup(func() { _ = ln.Close(); q.Close(); <-execDone; srv.Wait() })
+
+	// The real second-owner path: Listen probes the live socket and closes.
+	second, lerr := Listen(sock)
+	if lerr == nil {
+		_ = second.Close()
+		t.Fatal("second Listen() over a live socket = nil error, want a refusal")
+	}
+	waitForDebug(t, rec, "closed without sending a request")
+
+	for _, r := range rec.snapshot() {
+		if r.Level >= slog.LevelWarn {
+			t.Errorf("probe logged %v msg=%q, want nothing above DEBUG for a connection that sent no request", r.Level, r.Message)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if accepted != 0 || rejected != 0 {
+		t.Errorf("hooks saw accepted=%d rejected=%d, want 0/0: a probe is not a request", accepted, rejected)
+	}
+}
+
+// TestServer_LostRequestBytesStayWarned is the other half: every decode failure
+// that DID consume request bytes keeps its warning and its done{ok:false}, so
+// the silence above cannot widen into a lost trigger. A truncated write reports
+// io.ErrUnexpectedEOF, a different sentinel from the probe's bare io.EOF, and
+// it half-closes so the client can still read its answer.
+// Not parallel: captureLogs swaps the process-wide slog default.
+func TestServer_LostRequestBytesStayWarned(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		send string
+	}{
+		{name: "malformed", send: "this is not json\n"},
+		{name: "truncated mid-value", send: `{"repos":["cplieger/hom`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := captureLogs(t)
+			sock, _ := startTestServer(t, runOK)
+			conn, err := net.DialTimeout("unix", sock, time.Second)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			if _, err := conn.Write([]byte(tc.send)); err != nil {
+				t.Fatalf("write %s request: %v", tc.name, err)
+			}
+			// Half-close: the request is over (so the decode can conclude)
+			// while the client can still read its rejection.
+			if err := conn.(*net.UnixConn).CloseWrite(); err != nil {
+				t.Fatalf("half-close: %v", err)
+			}
+
+			if ev := nextEvent(t, json.NewDecoder(conn)); ev.Kind != EventDone || ev.OK {
+				t.Errorf("event = %+v, want done ok=false for a %s request", ev, tc.name)
+			}
+			warned := false
+			for _, r := range rec.snapshot() {
+				if r.Level == slog.LevelWarn && strings.Contains(r.Message, "trigger request rejected") {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Errorf("no WARN for a %s request; records = %v", tc.name, rec.snapshot())
+			}
+		})
+	}
+}
