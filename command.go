@@ -8,7 +8,7 @@ import (
 )
 
 // DefaultGrace is the graceful-shutdown grace period the scheduling apps use:
-// on context cancellation the child is sent SIGTERM and given this
+// on context cancellation the child process is sent SIGTERM and given this
 // long to exit before os/exec escalates to SIGKILL.
 const DefaultGrace = 5 * time.Second
 
@@ -18,11 +18,13 @@ const DefaultGrace = 5 * time.Second
 type CommandRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
 
 // NewCommandRunner returns a CommandRunner that builds a context-cancellable
-// command with graceful shutdown: on cancellation the child is sent SIGTERM
-// (rather than os/exec's default SIGKILL) and given grace before the SIGKILL
-// escalation. The caller wires Stdout/Stderr on the returned command — capture
-// them into buffers, or stream them to os.Stdout/os.Stderr — before calling
-// Run. A non-positive grace uses DefaultGrace.
+// command: on cancellation the child process is sent SIGTERM (rather than
+// os/exec's default SIGKILL) and given grace before the SIGKILL escalation.
+// Both signals reach that process only, never descendants it forked, so a
+// caller whose child forks — a package manager, a shell pipeline — sets
+// SysProcAttr.Setpgid on the returned command and replaces Cancel with a
+// group-targeted signal. The caller also wires Stdout/Stderr on the returned
+// command before calling Run. A non-positive grace uses DefaultGrace.
 func NewCommandRunner(grace time.Duration) CommandRunner {
 	if grace <= 0 {
 		grace = DefaultGrace

@@ -187,6 +187,15 @@ func (s *Server[P]) handle(conn net.Conn) {
 	var payload P
 	_ = conn.SetReadDeadline(time.Now().Add(requestReadTimeout))
 	if err := json.NewDecoder(io.LimitReader(conn, maxRequestBytes)).Decode(&payload); err != nil {
+		// A bare io.EOF means nothing was sent: Listen's own live-owner probe
+		// connects and closes without writing, and so does a client killed
+		// before its write. Nothing was requested and nothing was lost, so it
+		// is not a rejection. A request whose bytes arrived and were cut short
+		// reports io.ErrUnexpectedEOF, so it keeps the warning and the answer.
+		if errors.Is(err, io.EOF) {
+			slog.Debug("trigger connection closed without sending a request")
+			return
+		}
 		slog.Warn("trigger request rejected: undecodable", "error", err)
 		writeEvent(conn, Event{Kind: EventDone, OK: false, Reason: "undecodable request"})
 		return
