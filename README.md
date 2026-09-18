@@ -1,8 +1,6 @@
 # scheduler
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler/v4.svg)](https://pkg.go.dev/github.com/cplieger/scheduler/v4)
-[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/scheduler)](https://github.com/cplieger/scheduler/blob/main/go.mod)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/mutation.json)](https://github.com/cplieger/scheduler/issues?q=label%3Agremlins-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler/v4.svg)](https://pkg.go.dev/github.com/cplieger/scheduler/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/scheduler)](https://github.com/cplieger/scheduler/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/mutation.json)](https://github.com/cplieger/scheduler/issues?q=label%3Agremlins-tracker)
 
 > Scheduling scaffold for containerized job runners
 
