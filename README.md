@@ -2,22 +2,22 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler/v4.svg)](https://pkg.go.dev/github.com/cplieger/scheduler/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/scheduler)](https://github.com/cplieger/scheduler/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/mutation.json)](https://github.com/cplieger/scheduler/issues?q=label%3Agremlins-tracker)
 
-> Scheduling scaffold for containerized job runners
+scheduler lets your Go container run its job on an interval or an outside trigger, with no overlapping runs and a clean shutdown.
 
-A standalone Go library of small, composable primitives for a container that
-runs a job on an interval or an external trigger: interval parsing with the
-standard sentinels, a startup-plus-ticker run loop with jitter that drains on
-shutdown, an advisory `flock` overlap guard, a SIGTERM-graceful subprocess
-runner, and the `trigger` subpackage's single-owner trigger broker (bounded
-FIFO queue, owner-only unix-socket server, thin synchronous client, opt-in
-executor loop) for daemons where PID 1 owns every run. Standard library
-only (test dependency: `pgregory.net/rapid`). Unix-only (the overlap guard is
-`flock(2)`).
+It replaces the interval parsing, ticker loop, lock-file handling and graceful child-process shutdown you would otherwise write in each job runner's `main`. It uses only the standard library at run time, needs Go 1.27.1 or later, works on Unix systems only because its locks use `flock(2)`, and is licensed under Apache-2.0.
 
-It is a toolbox, not a framework: each primitive is independent, and the
-composition root wires the ones it needs. The library says nothing about what a
-job does, how health is signaled, or how logging is configured; those stay in
-the app.
+## Why use it
+
+scheduler is built for a long-running container with one job, such as a backup, sync or polling daemon.
+
+- `ParseInterval` reads a setting such as `JOB_INTERVAL` as a cadence, external-trigger mode or run-once mode.
+- `RunLoop` runs one job at a time on every tick, plus once at start with `FireOnStart`, and waits for it on shutdown.
+- `Stamp` records the last run on a volume, so a recreated container keeps its schedule and runs at start only when due.
+- `TryLock` lets a `docker exec` trigger skip its run during a timer run, and `Exclusive` queues it instead.
+- `NewCommandRunner` stops a child process with SIGTERM, then SIGKILL after a default 5-second grace.
+- With the `trigger` package, one daemon runs every job and each trigger waits for its own run's result.
+
+Consider [robfig/cron](https://github.com/robfig/cron) if you need cron expressions. It parses the standard cron format, with an optional seconds field and per-schedule time zones.
 
 ## Install
 
@@ -27,8 +27,7 @@ go get github.com/cplieger/scheduler/v4@latest
 
 ## Usage
 
-A typical composition root reads an interval variable, picks a mode, and drives
-the job, guarding overlap and shutting down gracefully:
+A typical `main` reads the interval setting, picks a mode, and runs each pass under the overlap lock:
 
 ```go
 package main
@@ -54,25 +53,23 @@ func main() {
 
 	switch sched.Mode {
 	case scheduler.ModeBuiltin:
-		// Fire once now, then every interval (with ±10% jitter), draining on SIGTERM.
+		// Fire once now, then every interval with ±10% jitter, draining on SIGTERM.
 		scheduler.RunLoop(ctx, runPass, scheduler.LoopOptions{
 			Interval:    sched.Interval,
 			FireOnStart: true,
 			Jitter:      0.10,
 		})
 	case scheduler.ModeExternal:
-		// Idle: runs are triggered out-of-band (an Ofelia docker-exec of a
-		// one-shot subcommand); the lock below keeps them from overlapping. A
-		// daemon that must itself wait out or cancel externally triggered runs
-		// should own execution instead; see the trigger subpackage.
+		// Idle: runs arrive from outside, for example a docker exec of a
+		// one-shot subcommand, and the lock keeps them from overlapping.
 		<-ctx.Done()
 	case scheduler.ModeOnce:
 		runPass(ctx) // run exactly once, then exit
 	}
 }
 
-// run builds context-cancellable subprocesses that get SIGTERM (not SIGKILL)
-// on shutdown, with a grace period before the kill.
+// run builds context-cancellable subprocesses that get SIGTERM on shutdown
+// and SIGKILL only after the grace period.
 var run = scheduler.NewCommandRunner(scheduler.DefaultGrace)
 
 func runPass(ctx context.Context) {
@@ -81,7 +78,7 @@ func runPass(ctx context.Context) {
 		return // could not acquire; mark unhealthy in a real app
 	}
 	if !ok {
-		return // another run already in flight; the overlap guard skips this one
+		return // another run is in flight; the overlap guard skips this one
 	}
 	defer lock.Unlock()
 
@@ -91,272 +88,53 @@ func runPass(ctx context.Context) {
 }
 ```
 
-### Interval parsing
+In `ModeExternal`, an external scheduler such as [Ofelia](https://github.com/mcuadros/ofelia) starts each run with `docker exec`. The package examples on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/scheduler/v4#pkg-examples) show `ParseInterval`, `TryLock`, `Exclusive` and `Stamp` on their own, and `go test` keeps them true. Pass `WithRedactedValue(true)` when the interval setting can hold an expanded secret, so `ParseInterval` warnings never echo its value. The trigger server never logs request payloads, because a forwarded environment can carry secrets.
 
-`ParseInterval` applies the standard sentinel and fallback rules to a
-`*_INTERVAL` environment value and returns a `Schedule` (cadence + `Mode`):
-
-| Raw value | Result |
-| --- | --- |
-| `"30m"`, `"1h30m"` (positive Go duration) | `ModeBuiltin`, that cadence (clamped by `WithBounds`) |
-| `""` (unset) | `ModeBuiltin`, the default cadence |
-| `"off"`, `"disabled"` (case-insensitive across ASCII letters only) | `ModeExternal` |
-| `"0"`, `"0s"` (zero) | `ModeExternal`, or `ModeOnce` with `WithZeroAsOnce(true)` |
-| `"-1h"` (negative) | `ModeBuiltin` at default + a warning (a likely typo) |
-| `"banana"` (unparseable) | `ModeBuiltin` at default + a warning |
-
-Options: `WithZeroAsOnce(zeroAsOnce)` (true treats a zero duration as run-once; false
-keeps the default), `WithBounds(low, high)` (clamp a positive cadence), `WithName(env)`
-(name the variable in warnings), `WithIntervalLogger(l)` (route warnings to a specific
-logger; defaults to `slog.Default()`), and `WithRedactedValue(redacted)` (true keeps the
-supplied raw value out of every warning; false keeps the default echo). Repeated
-applications of a bool option resolve last-wins. Pass `WithRedactedValue(true)` when the
-interval passes through secret-capable config expansion, where a typo could place an
-expanded secret in the field; plain env-var reads should keep the default echo, which is
-useful diagnostics.
-
-### Restart-aware startup fire
-
-`FireOnStart: true` runs the job once at boot for immediate freshness. For a
-container that is recreated often (an image that tracks a fast-moving
-upstream), that startup fire repeats work the previous container finished
-minutes earlier. `Stamp` records when a scheduled run last completed, in a
-file on a persisted volume, so the startup fire only happens when it is due:
-
-```go
-stamp := scheduler.NewStamp("/data/.myjob-last-run")
-
-due := stamp.Due(sched.Interval, time.Now(), scheduler.RetryFailed)
-scheduler.RunLoop(ctx, runPass, scheduler.LoopOptions{
-	Interval:    sched.Interval,
-	FireOnStart: due, // fire at boot only when no recent run survived the restart
-	// Phase the first tick from the previous run, not from boot: a run 30
-	// minutes old on a 1h interval means the next tick lands in 30 minutes.
-	FirstDelay: stamp.Remaining(sched.Interval, time.Now(), scheduler.RetryFailed),
-})
-```
-
-The job records each completed scheduled pass and its outcome with
-`stamp.Record(ok)`, and the caller decides which runs count (a manually
-triggered, scoped run typically does not). The `FailurePolicy` parameter states
-what a failed last run means, explicitly:
-
-- `RetryFailed`: only a fresh **successful** run suppresses the startup fire. A
-  restart after a failure runs again immediately, so an operator who fixes a
-  bad configuration and recreates the container gets instant feedback.
-- `CountFailed`: any completed run holds its schedule slot; the interval ticker
-  owns the retry. For jobs whose failed passes are expensive enough that a
-  restart must not repeat them early.
-
-A missing, torn, or unreadable record reads as due, so the failure direction is
-an extra startup run, never a skipped schedule. Without a persisted volume the
-file never survives a recreate and behavior degrades to the unconditional
-startup fire.
-
-`Remaining` is `Due`'s phase companion: the time left in the current period
-(zero exactly when due, capped at one interval). Wired into
-`LoopOptions.FirstDelay` it schedules the next run one interval after the
-previous execution instead of one interval after boot, so restarts neither
-add runs nor delay the cadence.
-
-### Overlap guard and coalescing
-
-`TryLock` / `Unlock` serialize runs across both the in-process loop and an
-out-of-band `docker exec` trigger. `ReadHolder` reads when the current holder
-acquired the lock (observability only). A trigger that arrives mid-run
-is not dropped: `Exclusive` (next section) queues it as a coalesced rerun.
-
-### Run coalescing across processes
-
-`Exclusive` packages the lock + queue pattern into cross-process run coalescing
-for a whole app: at most one cycle runs at a time per instance, across every
-entry point (the resident daemon's tick, a `poll` subcommand exec'd by an
-operator or an external scheduler). A request that arrives while a cycle runs
-is queued without blocking the requester: it records a rerun request in
-a counter file and exits immediately, and the active runner executes the queued
-demand when the current run finishes. Requests beyond the queue capacity
-(default 1, set with `WithQueueCapacity`) are discarded, because the queued
-rerun already guarantees a run starts after they arrived.
-
-The two entry points pair as queue mode for demand-driven callers and skip mode
-for time-driven ticks:
-
-```go
-ex := scheduler.NewExclusive("/config", logger)
-
-// Daemon: RunLoop ticks use skip mode: a busy lock means the job is already
-// running, and the next tick provides freshness; never queue a tick.
-scheduler.RunLoop(ctx, func(ctx context.Context) {
-	_, _ = ex.RunOrSkip(func() error { return runCycle(ctx) })
-}, scheduler.LoopOptions{Interval: sched.Interval, FireOnStart: true})
-
-// Poll subcommand (exec'd by an operator or an external scheduler): queue
-// mode: the request must be satisfied by a run that starts after it arrived.
-outcome, err := ex.Run(func() error { return runCycle(ctx) })
-switch outcome {
-case scheduler.OutcomeQueued, scheduler.OutcomeDiscarded:
-	os.Exit(0) // the in-flight runner covers this request; nothing to wait for
-default:
-	if err != nil {
-		os.Exit(1)
-	}
-}
-```
-
-The lock is a `flock(2)` (`cycle.lock` in the directory), so the kernel
-releases it when the holding process dies: a crashed run never wedges the
-scheduler, and a queue counter orphaned by a crash is cleared at the next
-acquisition. `Pending` reports the queued-request count for observability, and
-`ReadHolder` on `ExclusiveLockName` reports when the current cycle started.
-
-Three policy edges are deliberate, and all deferral is demand-preserving (the
-queue counter survives; the next run satisfies it):
-
-- A failed run does not stop queued demand: each queued request is owed a
-  run, succeed or fail, so the consume loop continues through job errors
-  (bounded by the rerun cap below) instead of dropping demand against a
-  failing job.
-- `WithGate(func() bool)` puts the composition root's shutdown signal
-  (typically the shutdown context's `Err`) in front of every run start: a gated initial run
-  returns `OutcomeGated` (`cycle gate closed; skipping run`), and queued
-  demand behind a closed gate defers (`cycle gate closed; deferring queued
-  demand`). An in-flight run is never interrupted, and a stop request is
-  never followed by a fresh run.
-- A holder executes at most 8 queued reruns per acquisition: past that cap it
-  retires (warning `rerun cap reached; deferring queued demand`), so a
-  relentless trigger source cannot pin one holder indefinitely. Each rerun's
-  `running queued cycle request` line carries an `attempt` ordinal for log
-  attribution.
-
-The storage under the queue counter is exported as `SlotFile`: a single-slot
-byte payload shared across processes through one file, mutated by atomic
-read-modify-write transactions under a short exclusive `flock` on the file
-itself. Build on it when your coalescing state needs a payload the counter
-cannot carry. The bytes' meaning, how concurrent demands merge, and when
-recorded demand counts as served stay the caller's policy; `SlotFile` owns
-only the transaction (create-on-first-use, blocking lock, skip-if-unchanged
-write, never unlink a live slot).
-
-### Single-owner trigger broker (`trigger` subpackage)
-
-Where `Exclusive` coordinates runs across processes, the `trigger` subpackage
-is the in-process alternative for daemons that own execution outright: PID 1
-executes every run as its own child, and triggers (the built-in ticker, each
-`docker exec`'d subcommand) only submit requests. One bounded FIFO
-`trigger.Queue` feeds one executor goroutine (mutual exclusion is that loop),
-a `trigger.Server` accepts requests on an owner-only in-container unix socket
-and streams `queued`/`started`/`done` events back, and `trigger.Submit` is
-the thin synchronous client a trigger subcommand wraps. No coalescing: every
-accepted request gets its own run, its own arguments, and its own true result,
-in arrival order.
-
-The request payload is a type parameter: a daemon whose runs take arguments
-declares a struct (repo slugs plus a forwarded environment, say); an argless
-daemon uses `struct{}`, which frames as `{}` on the wire.
-
-```go
-// Daemon side: one queue, one executor goroutine, one socket server.
-// trigger.Execute owns the Start/Finish lifecycle, so the exactly-one-result
-// contract is structural: the callback just returns the outcome.
-queue := trigger.NewQueue[payload](16)
-go func() {
-	trigger.Execute(ctx, queue, func(ctx context.Context, trig string, p payload) trigger.Outcome {
-		ok, elapsed := runPass(ctx, p) // the app's real work
-		return trigger.Outcome{OK: ok, Duration: elapsed}
-	})
-}()
-ln, err := trigger.Listen("/tmp/myapp.sock") // owner-only, stale file unlinked
-srv := &trigger.Server[payload]{Queue: queue}
-srv.Serve(ln)
-// shutdown: ln.Close(); queue.Close(); Execute drains and returns; srv.Wait()
-
-// Trigger subcommand: submit one run, wait for its own result.
-// Pass signal.NotifyContext so Ctrl-C unwinds the wait instead of killing
-// the process with the connection half-open.
-ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-defer stop()
-final, err := trigger.Submit(ctx, "/tmp/myapp.sock", payload{Repos: repos}, nil)
-// map final.OK / errors.Is(err, trigger.ErrUnreachable) to the exit code
-```
-
-The queue rejects fast when full or closing (`ErrFull`, `ErrClosed`; their
-messages travel the wire as the rejection reason). An accepted job is
-guaranteed exactly one result: `Execute` finishes jobs received after
-shutdown with `CancelledReason` instead of dropping them, and delivers a
-panicking run's failure result before propagating the panic, so a waiting
-client is never stranded. A daemon whose executor policy diverges (running
-jobs outside the shutdown context, halting admission on an app state, its own
-cancellation vocabulary) writes the ~7-line loop by hand instead; `Execute`
-is an opt-in mechanism, not a required framework. The server never logs payload
-contents (a forwarded environment can carry secrets; the
-`OnAccepted`/`OnRejected` hooks exist so the app logs acceptance in its own
-vocabulary). What a job does, how its outcome maps to health, and the exact
-wording of lifecycle log lines stay in the app, the same mechanism-vs-policy
-split as `SlotFile`.
+- [Scheduling a job](docs/scheduling.md) covers every interval value, restart-aware startup runs and subprocess shutdown.
+- [Overlap guard and run coalescing](docs/coordination.md) covers `TryLock`, `Exclusive` and `SlotFile`, for a run that starts from more than one process.
+- [Trigger broker](docs/trigger.md) covers the `trigger` package, where each trigger gets its own run and result.
 
 ## API
 
-- `Mode`: `ModeBuiltin`, `ModeExternal`, `ModeOnce` (implements `fmt.Stringer`).
-- `Schedule`: `{Interval, Mode}` returned by `ParseInterval`.
-- `ParseInterval(raw string, def time.Duration, opts ...IntervalOption) Schedule`.
-- `WithZeroAsOnce(zeroAsOnce bool)`, `WithBounds(low, high)`, `WithName(name)`, `WithIntervalLogger(l)`, `WithRedactedValue(redacted bool)`: interval options.
-- `Job`: `func(ctx context.Context)`, one unit of scheduled work.
-- `LoopOptions`: `{Interval, Jitter, FirstDelay, FireOnStart}`.
-- `RunLoop(ctx, job, opts)`: sequential startup-plus-ticker loop; drains on cancellation.
-- `JitteredDelay(interval, fraction) time.Duration`: the pure ±band jitter core.
-- `Stamp`, `NewStamp(path)`, `.Record(ok bool) error`, `.Last() (RunRecord, bool)`, `.Due(interval, now, policy) bool`, `.Remaining(interval, now, policy) time.Duration`: the restart-surviving last-run record behind a conditional, phase-preserving `FireOnStart`/`FirstDelay`.
-- `RunRecord`: `{Time, OK}`, one completed scheduled run.
-- `FailurePolicy`: `RetryFailed` (a failed run leaves the schedule stale; the startup fire retries it), `CountFailed` (any completed run holds its slot; the ticker owns the retry).
-- `Lock`, `TryLock(path) (*Lock, bool, error)`, `(*Lock).Unlock()`, `ReadHolder(path) (time.Time, bool)`.
-- `Exclusive`, `NewExclusive(dir, logger, opts...)`, `.Run(job) (Outcome, error)` (queue mode), `.RunOrSkip(job) (Outcome, error)` (skip mode), `.Pending() (int, error)`: cross-process run coalescing.
-- `WithQueueCapacity(n)`, `WithGate(func() bool)`: Exclusive options for queue depth (default 1) and a pre-run shutdown gate.
-- `SlotFile`, `NewSlotFile(path)`, `.Mutate(fn func(before []byte) []byte) ([]byte, error)`: the flock'd single-slot read-modify-write transaction behind Exclusive's counter, exported for app-defined coalescing payloads.
-- `Outcome`: `OutcomeRan`, `OutcomeRanQueued`, `OutcomeQueued`, `OutcomeDiscarded`, `OutcomeSkipped`, `OutcomeGated`, `OutcomeNone` (implements `fmt.Stringer`).
-- `ExclusiveLockName`, `ExclusiveQueueName`: the file names Exclusive maintains inside its directory.
-- `CommandRunner`, `NewCommandRunner(grace) CommandRunner`, `DefaultGrace`.
+- Interval parsing: `ParseInterval`, `Schedule`, `Mode` and the `With*` interval options.
+- Run loop: `RunLoop`, `LoopOptions`, `Job` and `JitteredDelay`.
+- Restart record: `Stamp`, `RunRecord` and `FailurePolicy`.
+- Overlap guard: `TryLock`, `Lock` and `ReadHolder`.
+- Run coalescing: `Exclusive` with `WithQueueCapacity` and `WithGate`, `Outcome`, and `SlotFile`.
+- Subprocesses: `CommandRunner`, `NewCommandRunner` and `DefaultGrace`.
+- Package `trigger`: `Queue`, `Job`, `Execute`, `Listen`, `Server`, `Submit`, `Event` and their error values.
 
-Subpackage `trigger` (the single-owner broker):
+The full reference is on pkg.go.dev for [scheduler](https://pkg.go.dev/github.com/cplieger/scheduler/v4) and [trigger](https://pkg.go.dev/github.com/cplieger/scheduler/v4/trigger).
 
-- `Queue[P]`, `NewQueue[P](capacity)`, `.Submit(*Job[P]) error`, `.Jobs() <-chan *Job[P]`, `.Close()`: the bounded FIFO; `ErrFull`, `ErrClosed`.
-- `Job[P]`, `NewJob[P](trigger, payload)`, `.Start()`, `.Started()`, `.Finish(Outcome)`, `.Result()`, `TriggerExternal`: one request and its exactly-one-result lifecycle.
-- `Execute[P](ctx, queue, run func(ctx, trigger, payload) Outcome)`: the opt-in executor loop that owns `Start`/`Finish` structurally; `CancelledReason` is the outcome reason for jobs cancelled by shutdown before starting.
-- `Outcome`: `{OK, Reason, Duration}`, a job's final result.
-- `Listen(path) (net.Listener, error)`: owner-only unix socket with stale-file hygiene.
-- `Server[P]`: `{Queue, OnAccepted, OnRejected}`, `.Serve(ln)`, `.Wait()`; streams `Event` lines per connection.
-- `Event`: `{Kind, Reason, DurationMs, OK}`; kinds `EventQueued`, `EventStarted`, `EventDone`.
-- `Submit[P](ctx, socketPath, payload, onEvent) (Event, error)`: the synchronous client; `ErrUnreachable`, `ErrSend`, `ErrConnectionLost`; `DialTimeout`. Cancelling `ctx` stops the wait.
+## Unsupported by design
 
-## Unsupported by Design
-
-These are deliberate non-goals, not a TODO list. The library is one cohesive
-concept (schedule a container job, guard its overlap, run and drain it) and
-stays small on purpose.
+These are deliberate non-goals, which keep the library small.
 
 | Feature | Rationale |
 | --- | --- |
-| Logging setup (slog handler, UTC time attr) | The composition root owns logging. The library logs interval warnings through `slog.Default()` (or `WithIntervalLogger`) and `Exclusive`'s coalescing lines through its injected logger (nil falls back to `slog.Default()`); it never configures a handler. |
-| Health signaling | `Set(healthy)` is the app's call inside its job. Use the companion [`health`](https://github.com/cplieger/health) library for the marker; the two compose. |
-| What a job does / its outcome type | `Job` is `func(ctx)`. Exit codes, health flips, and log lines are the app's policy, wired inside the closure. |
-| Cron expressions / calendar schedules | This is interval + external-trigger scheduling. For `0 2 * * *` semantics, use an external scheduler (Ofelia, cron) in `ModeExternal`. |
-| Distributed / multi-node coordination | The `flock` guard is single-host. Cross-node leader election is a different abstraction (a lease store), out of scope. |
-| Concurrent in-process runs | `RunLoop` is sequential by design (two runs never overlap in-process); the `flock` guards the cross-process case. Run a job concurrently yourself if you must. |
-| Retry / backoff of a failed run | Retrying outbound work belongs to [`httpx`](https://github.com/cplieger/httpx); a failed pass is reported by the job and retried on the next tick or trigger. |
+| Logging setup | Your `main` owns logging. The library logs through `slog.Default()` or a logger you pass, and never configures a handler. |
+| Health signaling | Set health inside your job, with the companion [health](https://github.com/cplieger/health) library. |
+| What a job does and its result type | `Job` is `func(ctx)`. Exit codes, health and log lines are your policy. |
+| Cron expressions and calendar schedules | Run an external scheduler such as Ofelia or cron in `ModeExternal`. |
+| Coordination across hosts | The `flock` guard works on one host. Leader election across nodes needs a lease store. |
+| Concurrent runs in one process | `RunLoop` runs one job at a time by design. Run jobs concurrently yourself if you must. |
+| Retry and backoff of a failed run | Retrying outbound calls belongs to [httpx](https://github.com/cplieger/httpx). A failed pass is retried on the next tick or trigger. |
+
+## Documentation
+
+- [Scheduling a job](docs/scheduling.md) covers every interval value, the run loop, restart-aware startup runs and subprocess shutdown.
+- [Overlap guard and run coalescing](docs/coordination.md) covers `TryLock`, `Exclusive` and `SlotFile`, for a job that starts from more than one process.
+- [Trigger broker](docs/trigger.md) covers the `trigger` package, for a daemon that runs every job itself.
 
 ## Contributing
 
-Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
-conventions and how to run the checks locally.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions and how to run the checks locally.
 
 ## Disclaimer
 
-This project is built with care and follows security best practices, but it is
-intended for personal / self-hosted use. No guarantees of fitness for production
-environments. Use at your own risk.
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
-This project was built with AI-assisted tooling using
-[Claude](https://claude.com), [GPT](https://openai.com), and
-[Kiro](https://kiro.dev). The human maintainer defines architecture,
-supervises implementation, and makes all final decisions.
+This project was built with AI-assisted tooling using [Claude](https://claude.com), [GPT](https://openai.com), and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
 ## License
 
