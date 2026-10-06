@@ -18,7 +18,7 @@ type payload struct {
 
 // Example wires the whole broker: a daemon-side queue served by one executor
 // goroutine and exposed on a unix socket, and a client that submits one run
-// and waits for its result — the fleet's single-owner scheduler shape.
+// and waits for its result — the single-owner scheduler shape.
 func Example() {
 	dir, err := os.MkdirTemp("/tmp", "trigger-example-")
 	if err != nil {

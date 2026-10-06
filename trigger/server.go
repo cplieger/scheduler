@@ -31,7 +31,7 @@ const (
 	// eventWriteTimeout bounds each status write, so a dead client cannot
 	// block a handler.
 	eventWriteTimeout = 10 * time.Second
-	// maxRequestBytes caps one request line. The largest fleet payload is a
+	// maxRequestBytes caps one request line. The largest known payload is a
 	// forwarded environ, kernel-bounded to ~2 MiB per exec, so 8 MiB is
 	// generous headroom; anything larger is a bug or abuse and is rejected as
 	// undecodable.

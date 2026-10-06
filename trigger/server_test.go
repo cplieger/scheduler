@@ -177,7 +177,7 @@ func TestServer_PayloadReplaysExactlyToTheExecutor(t *testing.T) {
 		runOK(j)
 	})
 
-	dec := rawRequest(t, sock, testPayload{Repos: []string{"cplieger/homelab", "cplieger/ci"}})
+	dec := rawRequest(t, sock, testPayload{Repos: []string{"owner/repo", "cplieger/ci"}})
 	for {
 		if ev := nextEvent(t, dec); ev.Kind == EventDone {
 			break
@@ -185,7 +185,7 @@ func TestServer_PayloadReplaysExactlyToTheExecutor(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 1 || len(seen[0].Repos) != 2 || seen[0].Repos[0] != "cplieger/homelab" {
+	if len(seen) != 1 || len(seen[0].Repos) != 2 || seen[0].Repos[0] != "owner/repo" {
 		t.Errorf("executor saw payloads %+v, want the request's exact repos", seen)
 	}
 }

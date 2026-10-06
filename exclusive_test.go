@@ -327,7 +327,7 @@ func TestExclusiveZeroValueQueuesLikeConstructed(t *testing.T) {
 	}
 }
 
-// TestExclusiveQueueCapacityIsLastWins pins the fleet option convention on
+// TestExclusiveQueueCapacityIsLastWins pins the shared option convention on
 // WithQueueCapacity: repeated applications resolve to the last value, so a
 // composition root narrowing a wider default really gets the narrow queue.
 func TestExclusiveQueueCapacityIsLastWins(t *testing.T) {

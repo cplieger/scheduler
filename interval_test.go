@@ -198,7 +198,7 @@ func TestParseIntervalRedactedClampKeepsBound(t *testing.T) {
 	}
 }
 
-// TestIntervalOptionsAreLastWins pins the fleet option convention on the two
+// TestIntervalOptionsAreLastWins pins the shared option convention on the two
 // parameter-taking bool options: repeated applications resolve to the last
 // value, and an explicit false behaves exactly like leaving the option out.
 func TestIntervalOptionsAreLastWins(t *testing.T) {
