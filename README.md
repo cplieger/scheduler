@@ -1,5 +1,8 @@
 # scheduler
 
+> Moved to [`github.com/cplieger/go/scheduler`](https://github.com/cplieger/go/tree/dev/scheduler).
+> **Archived 2026-11-06. This repository is read-only. The published Go module stays available.**
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/scheduler/v4.svg)](https://pkg.go.dev/github.com/cplieger/scheduler/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/scheduler)](https://github.com/cplieger/scheduler/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/scheduler/badges/mutation.json)](https://github.com/cplieger/scheduler/issues?q=label%3Agremlins-tracker)
 
 scheduler lets your Go container run its job on an interval or an outside trigger, with no overlapping runs and a clean shutdown.
